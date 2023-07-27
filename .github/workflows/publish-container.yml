@@ -44,6 +44,7 @@ jobs:
           # either 'goreleaser' (default) or 'goreleaser-pro'
           distribution: goreleaser
           version: latest
+          # Switch this to release by removing snapshot later
           args: release --clean --snapshot
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -133,9 +134,9 @@ jobs:
       #       cp dist/* .
       #     working-directory: ./app  # Replace this with the path to your Docker context
 
-      - name: Build and push Docker images
-        uses: docker/build-push-action@v2.2.0
-        with:
-          context: ./images
-          push: true
-          tags: "${{ steps.generate-tag-list.outputs.taglist }}"
+      # - name: Build and push Docker images
+      #   uses: docker/build-push-action@v2.2.0
+      #   with:
+      #     context: ./images
+      #     push: true
+      #     tags: "${{ steps.generate-tag-list.outputs.taglist }}"
