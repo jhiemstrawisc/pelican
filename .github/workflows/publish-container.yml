@@ -1,0 +1,144 @@
+# .github/workflows/publish-container.yaml
+name: Release, Build, and Push
+
+on:
+  push:
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+
+    branches:
+      - main
+      # DELETE
+      - dockerize
+  pull_request:
+    types:
+      # DELETE
+      - open
+      - closed
+    branches:
+      - main
+  repository_dispatch:
+    types:
+      - dispatch-build
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.18
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v4
+        with:
+          # either 'goreleaser' (default) or 'goreleaser-pro'
+          distribution: goreleaser
+          version: latest
+          args: release --rm-dist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Your GoReleaser Pro key, if you are using the 'goreleaser-pro' distribution
+          # GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+
+      - name: FOO
+      id: print stuff
+
+      run: |
+        ls -lah
+  
+  make-date-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      dtag: ${{ steps.mkdatetag.outputs.dtag }}
+    steps:
+    - name: make date tag
+      id: mkdatetag
+      run: echo "::set-output name=dtag::$(date +%Y%m%d-%H%M)"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [make-date-tag]
+    strategy:
+      fail-fast: False
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Download GoReleaser Artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: goreleaser-artifact
+          path: dist/
+
+    - name: Generate tag list
+      id: generate-tag-list
+      env:
+        TIMESTAMP: ${{ needs.make-date-tag.outputs.dtag }}
+      run: |
+        # Check if we're working with a tagged version
+        if [ -z "${{ inputs.tag }}" ]
+        then
+          # Use regex to check for a semver tag match
+          if [[ ${GITHUB_REF##*/} =~ v[0-9]+\.[0-9]+\.[0-9]+ ]]
+          then
+            GITHUB_TAG=${GITHUB_REF##*/}
+          else
+            GITHUB_TAG="latest"
+          fi
+        else
+          GITHUB_TAG=${{ inputs.tag }}
+        fi
+
+        echo "Master SHA:"
+        echo $(git rev-parse $GITHUB_REF_NAME)
+
+        echo "Current SHA:"
+        echo $(git rev-parse HEAD)
+
+        echo $GITHUB_TAG
+
+        docker_repo="pelican_platform/pelican"
+        tag_list=()
+        for registry in hub.opensciencegrid.org; do
+          for image_tag in "$GITHUB_TAG"; do
+            tag_list+=("$registry/$docker_repo":"$image_tag")
+          done
+        done
+        # This causes the tag_list array to be comma-separated below,
+        # which is required for build-push-action
+        IFS=,
+        echo "::set-output name=taglist::${tag_list[*]}"
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v1
+
+    - name: Log in to OSG Harbor
+      uses: docker/login-action@v1
+      with:
+        registry: hub.opensciencegrid.org
+        username: ${{ secrets.PELICAN_HARBOR_ROBOT_USER }}
+        password: ${{ secrets.PELICAN_HARBOR_ROBOT_PASSWORD }}
+
+    # - name: Copy GoReleaser Artifact into Docker context
+    #     run: |
+    #       cp dist/* .
+    #     working-directory: ./app  # Replace this with the path to your Docker context
+
+    - name: Build and push Docker images
+      uses: docker/build-push-action@v2.2.0
+      with:
+        context: ./images
+        push: true
+        tags: "${{ steps.generate-tag-list.outputs.taglist }}"
+
+
+
