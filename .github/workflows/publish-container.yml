@@ -74,8 +74,7 @@ jobs:
     strategy:
       fail-fast: False
     steps:
-    - uses: actions/checkout@v2
-
+      - uses: actions/checkout@v2
       - name: Download GoReleaser Artifact
         uses: actions/download-artifact@v2
         with:
