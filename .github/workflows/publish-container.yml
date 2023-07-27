@@ -1,3 +1,4 @@
+
 name: Release, Build, and Push
 
 on:
@@ -36,7 +37,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: 1.18
+          go-version: 1.19
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v4
@@ -64,7 +65,8 @@ jobs:
     steps:
       - name: make date tag
         id: mkdatetag
-        run: echo "::set-output name=dtag::$(date +%Y%m%d-%H%M)"
+        run: echo "dtag=$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+        #run: echo "::set-output name=dtag::$(date +%Y%m%d-%H%M)"
 
   build:
     runs-on: ubuntu-latest
