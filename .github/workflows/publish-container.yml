@@ -76,11 +76,11 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: Download GoReleaser Artifact
-        uses: actions/download-artifact@v2
-        with:
-          name: goreleaser-artifact
-          path: dist/
+      # - name: Download GoReleaser Artifact
+      #   uses: actions/download-artifact@v2
+      #   with:
+      #     name: goreleaser-artifact
+      #     path: dist/
 
       - name: Generate tag list
         id: generate-tag-list
@@ -131,10 +131,10 @@ jobs:
           username: ${{ secrets.PELICAN_HARBOR_ROBOT_USER }}
           password: ${{ secrets.PELICAN_HARBOR_ROBOT_PASSWORD }}
 
-      # - name: Copy GoReleaser Artifact into Docker context
-      #     run: |
-      #       cp dist/* .
-      #     working-directory: ./app  # Replace this with the path to your Docker context
+      - name: Copy GoReleaser Artifact into Docker context
+          run: |
+            cp dist/* .
+          working-directory: ./app  # Replace this with the path to your Docker context
 
       # - name: Build and push Docker images
       #   uses: docker/build-push-action@v2.2.0
