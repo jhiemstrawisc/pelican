@@ -133,13 +133,12 @@ jobs:
 
       - name: Copy GoReleaser Artifact into Docker context
         run: |
-          mkdir app
           cp dist/* .
-        working-directory: app  # Replace this with the path to your Docker context
+        # working-directory: app  # Replace this with the path to your Docker context
 
-      # - name: Build and push Docker images
-      #   uses: docker/build-push-action@v2.2.0
-      #   with:
-      #     context: ./images
-      #     push: true
-      #     tags: "${{ steps.generate-tag-list.outputs.taglist }}"
+      - name: Build and push Docker images
+        uses: docker/build-push-action@v2.2.0
+        with:
+          context: ./images
+          push: true
+          tags: "${{ steps.generate-tag-list.outputs.taglist }}"
