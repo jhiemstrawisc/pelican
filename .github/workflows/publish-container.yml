@@ -148,5 +148,6 @@ jobs:
         uses: docker/build-push-action@v2.2.0
         with:
           context: .
+          file: ./images/Dockerfile
           push: true
           tags: "${{ steps.generate-tag-list.outputs.taglist }}"
