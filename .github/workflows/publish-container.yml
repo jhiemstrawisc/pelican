@@ -132,9 +132,9 @@ jobs:
           password: ${{ secrets.PELICAN_HARBOR_ROBOT_PASSWORD }}
 
       - name: Copy GoReleaser Artifact into Docker context
-          run: |
-            cp dist/* .
-          working-directory: ./app  # Replace this with the path to your Docker context
+        run: |
+          cp dist/* .
+        working-directory: ./app  # Replace this with the path to your Docker context
 
       # - name: Build and push Docker images
       #   uses: docker/build-push-action@v2.2.0
