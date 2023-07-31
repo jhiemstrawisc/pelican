@@ -96,15 +96,24 @@ func DownloadDB(localFile string) error {
 	if err != nil {
 		return err
 	}
+
+	var licenseKey string
 	keyFile := viper.GetString("MaxMindKeyFile")
-	if keyFile == "" {
-		return errors.New("No MaxMind license key found in MaxMindKeyFile config parameter")
+	keyFromEnv := viper.GetString("MAXMINDKEY")
+	if keyFile != "" {
+		fmt.Println("In key from file:", keyFile)
+		contents, err := os.ReadFile(keyFile)
+		if err != nil {
+			return err
+		}
+		licenseKey = strings.TrimSpace(string(contents))
+	} else if keyFromEnv != "" {
+		fmt.Println("In key from env:", keyFromEnv)
+		licenseKey = keyFromEnv
+	} else {
+		return errors.New("A MaxMind key file must be specified in the config (MaxMindKeyFile) or in the environment (PELICAN_MAXMINDKEYFILE), or the key must be provided via the environment (PELICAN_MAXMINDKEY)")
 	}
-	contents, err := os.ReadFile(keyFile)
-	if err != nil {
-		return err
-	}
-	licenseKey := strings.TrimSpace(string(contents))
+
 	url := fmt.Sprintf(maxMindURL, licenseKey)
 	localDir := filepath.Dir(localFile)
 	fileHandle, err := os.CreateTemp(localDir, filepath.Base(localFile)+".tmp")
