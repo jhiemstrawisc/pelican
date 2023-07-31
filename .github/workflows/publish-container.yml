@@ -53,9 +53,9 @@ jobs:
           # GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
 
       - name: Upload GoReleaser artifacts
-        uses: actions/upload-artifact@v2
-        with:
-          name: goreleaser-artifact
+        uses: actions/upload-artifact@v3
+        with: 
+          name: pelican-artifacts
           path: dist/
 
   make-date-tag:
@@ -77,9 +77,9 @@ jobs:
       - uses: actions/checkout@v2
 
       - name: Download GoReleaser Artifact
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v3
         with:
-          name: goreleaser-artifact
+          name: pelican-artifacts
           path: dist/
 
       - name: Generate tag list
