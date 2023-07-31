@@ -80,7 +80,7 @@ jobs:
         uses: actions/download-artifact@v3
         with:
           name: pelican-artifacts
-          path: /dist
+          path: ~/dist
 
       - name: Generate tag list
         id: generate-tag-list
@@ -136,7 +136,7 @@ jobs:
 
       - name: Copy GoReleaser Artifact into Docker context
         run: |
-          cp /dist/pelican_linux_amd64_v1/pelican .
+          cp ~/dist/pelican_linux_amd64_v1/pelican .
         working-directory: ./images  # Replace this with the path to your Docker context
 
       - name: Build and push Docker images
