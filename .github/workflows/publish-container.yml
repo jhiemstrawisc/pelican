@@ -52,16 +52,11 @@ jobs:
           # Your GoReleaser Pro key, if you are using the 'goreleaser-pro' distribution
           # GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
 
-        - name: Upload GoReleaser artifacts
-          uses: actions/upload-artifact@v2
-          with:
-            name: goreleaser-artifact
-            path: dist/
-      # Comment out the following step as it's not used in the current workflow
-      # - name: FOO
-      #   id: print stuff
-      #   run: |
-      #     ls -lah
+      - name: Upload GoReleaser artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: goreleaser-artifact
+          path: dist/
 
   make-date-tag:
     runs-on: ubuntu-latest
