@@ -80,7 +80,7 @@ jobs:
         uses: actions/download-artifact@v3
         with:
           name: pelican-artifacts
-          path: dist
+          path: ~/dist
 
       - name: Generate tag list
         id: generate-tag-list
@@ -134,9 +134,13 @@ jobs:
       #     username: ${{ secrets.PELICAN_HARBOR_ROBOT_USER }}
       #     password: ${{ secrets.PELICAN_HARBOR_ROBOT_PASSWORD }}
 
+      - name: Generate dir tree
+        run: |
+          tree -d .
+          
       - name: Copy GoReleaser Artifact into Docker context
         run: |
-          cp dist/pelican_linux_amd64_v1/pelican .
+          cp ~/dist/pelican_linux_amd64_v1/pelican .
         working-directory: ./images 
 
       - name: Build and push Docker images
