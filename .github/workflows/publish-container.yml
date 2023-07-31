@@ -109,7 +109,9 @@ jobs:
 
           echo $GITHUB_TAG
 
-          docker_repo="pelican_platform/pelican"
+          #SWITCH THIS LATER
+          docker_repo="jhiemstra/pelican"
+          #docker_repo="pelican_platform/pelican"
           tag_list=()
           for registry in hub.opensciencegrid.org; do
             for image_tag in "$GITHUB_TAG"; do
@@ -127,7 +129,8 @@ jobs:
       - name: Log in to OSG Harbor
         uses: docker/login-action@v1
         with:
-          registry: hub.opensciencegrid.org
+          #registry: hub.opensciencegrid.org
+          registry: hub.docker.com
           username: ${{ secrets.PELICAN_HARBOR_ROBOT_USER }}
           password: ${{ secrets.PELICAN_HARBOR_ROBOT_PASSWORD }}
 
