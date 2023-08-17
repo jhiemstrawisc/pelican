@@ -114,12 +114,12 @@ jobs:
           IFS=,
           echo "::set-output name=taglist::${tag_list[*]}"
 
-      - name: Log in to OSG Harbor
-        uses: docker/login-action@v2
-        with:
-          #registry: hub.opensciencegrid.org
-          username: ${{ secrets.PELICAN_HARBOR_ROBOT_USER }}
-          password: ${{ secrets.PELICAN_HARBOR_ROBOT_PASSWORD }}
+      # - name: Log in to OSG Harbor
+      #   uses: docker/login-action@v2
+      #   with:
+      #     registry: hub.opensciencegrid.org
+      #     username: ${{ secrets.PELICAN_HARBOR_ROBOT_USER }}
+      #     password: ${{ secrets.PELICAN_HARBOR_ROBOT_PASSWORD }}
           
       - name: Copy GoReleaser Artifact into Docker context
         # For now, only working about the linux amd64 artifact,
@@ -136,5 +136,6 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           context: ./images
-          push: true
+          # SWITCH BACK TO TRUE AFTER TESTING
+          push: false
           tags: "${{ steps.generate-tag-list.outputs.taglist }}"
