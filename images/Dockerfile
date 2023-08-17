@@ -18,7 +18,7 @@ RUN useradd -o -u 10940 -g 10940 -s /bin/sh xrootd
 
 # Install dependencies
 RUN yum -y update \
-    && yum -y install golang xrootd xrootd-client xrootd-server \
+    && yum -y install golang xrootd xrootd-client xrootd-server cmake gcc gcc-c++ make \
     && yum clean all \
     && rm -rf /var/cache/yum/
 
