@@ -18,7 +18,8 @@ RUN useradd -o -u 10940 -g 10940 -s /bin/sh xrootd
 
 # Install dependencies
 RUN yum -y update \
-    && yum -y install golang xrootd xrootd-client xrootd-server cmake gcc gcc-c++ make \
+    && yum -y install golang xrootd xrootd-client xrootd-server \
+    && yum install -y gcc gcc-c++ make cmake-3.20.2-5.el8 \
     && yum clean all \
     && rm -rf /var/cache/yum/
 
