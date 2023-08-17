@@ -3,6 +3,15 @@ ARG BASE_OSG_SERIES=3.6
 
 FROM opensciencegrid/software-base:$BASE_OSG_SERIES-el7-$BASE_YUM_REPO
 
+# NOTE: This container is set up to be run by
+# github actions in this repository. Using it
+# without modification outside of that environment
+# will result in lots of frustration
+
+###############################################
+#  Container setup & Dependency installation  #
+###############################################
+
 # Create the xrootd user with a fixed GID/UID
 RUN groupadd -o -g 10940 xrootd
 RUN useradd -o -u 10940 -g 10940 -s /bin/sh xrootd
@@ -13,6 +22,19 @@ RUN yum -y update \
     && yum clean all \
     && rm -rf /var/cache/yum/
 
+# Build and install origin plugins
+# (eventually this should be done via the rpms...)
+COPY ../origin_plugins/http_s3 http_s3
+RUN cd http_s3 && \
+    mkdir build && \
+    cd build && \
+    cmake .. && \
+    make install
+
+
+###############################################
+# Set up Pelican proper and handle supervisor #
+###############################################
 WORKDIR /pelican
 
 # Copy over needed files
@@ -30,5 +52,8 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /pelican/osdf-client \
     && chmod +x /entrypoint.sh
 
+# Can now run the container with an argument like
+# director_serve or origin_serve, and it will 
+# perform those actions.
 ENTRYPOINT ["/entrypoint.sh"]
 
