@@ -78,6 +78,7 @@ func copyMain(cmd *cobra.Command, args []string) {
 
 	// Set the progress bars to the command line option
 	pelican.ObjectClientOptions.Token, _ = cmd.Flags().GetString("token")
+	log.Debugln("TOKEN???", pelican.ObjectClientOptions.Token)
 
 	// Check if the program was executed from a terminal
 	// https://rosettacode.org/wiki/Check_output_device_is_a_terminal#Go

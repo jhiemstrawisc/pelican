@@ -11,7 +11,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func getRedirectURL(reqPath string, ad ServerAd, requiresAuth bool) (redirectURL url.URL) {
+func getRedirectURL(reqPath string, ad ServerAd, requiresAuth bool, authHeader string) (redirectURL url.URL) {
 	var serverURL url.URL
 	if requiresAuth {
 		serverURL = ad.AuthURL
@@ -26,6 +26,12 @@ func getRedirectURL(reqPath string, ad ServerAd, requiresAuth bool) (redirectURL
 	}
 	redirectURL.Host = serverURL.Host
 	redirectURL.Path = reqPath
+
+	if authHeader != "" {
+		authParam := url.Values{}
+		authParam.Add("Authorization", authHeader)
+		redirectURL.RawQuery = authParam.Encode()
+	}
 	return
 }
 
@@ -51,8 +57,8 @@ func RedirectToCache(ginCtx *gin.Context) {
 	reqPath := path.Clean("/" + ginCtx.Request.URL.Path)
 	reqPath = strings.TrimPrefix(reqPath, "/api/v1.0/director/object")
 
-	authHeader := ginCtx.Request.Header["Authorization"]
-	log.Errorf("\n\nAuth header?: %s\n", authHeader)
+	authHeader := ginCtx.GetHeader("Authorization")
+	log.Errorln("\n\nAuth header?: ", authHeader)
 	log.Errorln("All headers?: ", ginCtx.Request.Header)
 
 	ipAddr, err := getRealIP(ginCtx)
@@ -73,7 +79,7 @@ func RedirectToCache(ginCtx *gin.Context) {
 		ginCtx.String(500, "Failed to determine server ordering")
 		return
 	}
-	redirectURL := getRedirectURL(reqPath, cacheAds[0], namespaceAd.RequireToken)
+	redirectURL := getRedirectURL(reqPath, cacheAds[0], namespaceAd.RequireToken, authHeader)
 
 	linkHeader := ""
 	first := true
@@ -83,7 +89,7 @@ func RedirectToCache(ginCtx *gin.Context) {
 		} else {
 			linkHeader += ", "
 		}
-		redirectURL := getRedirectURL(reqPath, ad, namespaceAd.RequireToken)
+		redirectURL := getRedirectURL(reqPath, ad, namespaceAd.RequireToken, authHeader)
 		linkHeader += fmt.Sprintf(`<%s>; rel="duplicate"; pri=%d`, redirectURL.String(), idx+1)
 	}
 	ginCtx.Writer.Header()["Link"] = []string{linkHeader}
@@ -119,7 +125,7 @@ func RedirectToOrigin(ginCtx *gin.Context) {
 	reqPath := path.Clean("/" + ginCtx.Request.URL.Path)
 	reqPath = strings.TrimPrefix(reqPath, "/api/v1.0/director/origin")
 
-	authHeader := ginCtx.Request.Header["Authorization"]
+	authHeader := ginCtx.GetHeader("Authorization")
 	log.Errorf("\n\nAuth header?: %s\n", authHeader)
 	log.Errorln("All headers?: ", ginCtx.Request.Header)
 
@@ -142,7 +148,7 @@ func RedirectToOrigin(ginCtx *gin.Context) {
 		return
 	}
 
-	redirectURL := getRedirectURL(reqPath, originAds[0], namespaceAd.RequireToken)
+	redirectURL := getRedirectURL(reqPath, originAds[0], namespaceAd.RequireToken, authHeader)
 	ginCtx.Redirect(307, redirectURL.String())
 
 }

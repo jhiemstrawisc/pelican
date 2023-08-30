@@ -112,6 +112,7 @@ func getToken(destination *url.URL, namespace namespaces.Namespace, isWrite bool
 		to by the environment variable "_CONDOR_CREDS".
 	*/
 	var token_location string
+	log.Debugf("\n\n do we have a token location? %s\n\n\n", ObjectClientOptions)
 	if ObjectClientOptions.Token != "" {
 		token_location = ObjectClientOptions.Token
 		log.Debugln("Getting token location from command line:", ObjectClientOptions.Token)

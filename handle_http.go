@@ -252,6 +252,9 @@ func download_http(source string, destination string, payload *payloadStruct, na
 	var closestNamespaceCaches []CacheInterface
 	if OSDFDirectorUrl != "" {
 		log.Debugln("Using OSDF Director at ", OSDFDirectorUrl)
+		log.Debugln("Token? ", token)
+
+		log.Debugf("\n\n Namespace: %s\n\n", namespace)
 		closestNamespaceCaches = make([]CacheInterface, len(namespace.SortedDirectorCaches))
 		for i, v := range namespace.SortedDirectorCaches {
 			closestNamespaceCaches[i] = v
