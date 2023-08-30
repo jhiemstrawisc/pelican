@@ -50,6 +50,11 @@ func getRealIP(ginCtx *gin.Context) (ipAddr netip.Addr, err error) {
 func RedirectToCache(ginCtx *gin.Context) {
 	reqPath := path.Clean("/" + ginCtx.Request.URL.Path)
 	reqPath = strings.TrimPrefix(reqPath, "/api/v1.0/director/object")
+
+	authHeader := ginCtx.Request.Header["Authorization"]
+	log.Errorf("\n\nAuth header?: %s\n", authHeader)
+	log.Errorln("All headers?: ", ginCtx.Request.Header)
+
 	ipAddr, err := getRealIP(ginCtx)
 	if err != nil {
 		return
@@ -113,6 +118,10 @@ func RedirectToCache(ginCtx *gin.Context) {
 func RedirectToOrigin(ginCtx *gin.Context) {
 	reqPath := path.Clean("/" + ginCtx.Request.URL.Path)
 	reqPath = strings.TrimPrefix(reqPath, "/api/v1.0/director/origin")
+
+	authHeader := ginCtx.Request.Header["Authorization"]
+	log.Errorf("\n\nAuth header?: %s\n", authHeader)
+	log.Errorln("All headers?: ", ginCtx.Request.Header)
 
 	// Each namespace may be exported by several origins, so we must still
 	// do the geolocation song and dance if we want to get the closest origin...

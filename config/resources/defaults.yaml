@@ -1,5 +1,5 @@
 Port: 8443
-WebPort: 8444
+WebPort: 8443
 WebAddress: "0.0.0.0"
 ManagerPort: 1213
 SummaryMonitoringPort: 9931
