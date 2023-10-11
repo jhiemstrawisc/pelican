@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+
 ARG BASE_YUM_REPO=release
 ARG BASE_OSG_SERIES=3.6
 
