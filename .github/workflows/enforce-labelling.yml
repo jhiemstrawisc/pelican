@@ -5,7 +5,7 @@ on:
     # one limitation here is that there's no trigger to re-run any time we "connect" or "disconnect" an issue
     types: [opened, edited, labeled, unlabeled, synchronize]
   issues:
-    types: [opened, edited, labeled, unlabeled]
+    types: [opened, edited, labeled, unlabeled, closed]
 
 jobs:
   validate-pr:
@@ -32,6 +32,7 @@ jobs:
           TIMELINE_JSON=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/issues/$PR_NUMBER/timeline")
 
           # Count the number of times the timeline sees a "connected" event and subract the number of "disconnected" events
+          # We might also consider using the "cross-referenced" event in the future if actual connecting/disconnecting is too heavy-handed
           LINKED_ISSUES=$(echo "$TIMELINE_JSON" | jq '
             reduce .[] as $event (
               0;
@@ -57,6 +58,7 @@ jobs:
 
   validate-issue:
     runs-on: ubuntu-latest
+    if: github.event.action == 'closed'
     steps:
       - name: Check out the repository
         uses: actions/checkout@v2
@@ -68,4 +70,34 @@ jobs:
           if [ "$ISSUE_LABELS" -eq "0" ]; then
             echo "No labels found on the issue."
             exit 1
+          fi
+
+      - name: Validate issue is linked to a PR
+        id: check_linked_prs
+        run: |
+          ISSUE_NUMBER=$(jq -r '.issue.number' $GITHUB_EVENT_PATH)
+          REPO_OWNER=$(jq -r '.repository.owner.login' $GITHUB_EVENT_PATH)
+          REPO_NAME=$(jq -r '.repository.name' $GITHUB_EVENT_PATH)
+          TIMELINE_JSON=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/issues/$ISSUE_NUMBER/timeline")
+
+          LINKED_PRS=$(echo "$TIMELINE_JSON" | jq '
+            reduce .[] as $event (
+              0;
+              if $event.event == "connected" then
+                . + 1
+              elif $event.event == "disconnected" then
+                . - 1
+              else
+                .
+              end
+            )')
+
+          if [ "$LINKED_PRS" -eq "0" ]; then
+            echo "❌ No linked pull requests found in the issue."
+            exit 1
+          elif [ "$LINKED_PRS" -lt "0" ]; then
+            echo "Error: More disconnected events than connected events. This shouldn't be possible and likely indicates a big ol' 🪲"
+            exit 1
+          else
+            echo "Linked PRs found: $LINKED_PRS"
           fi
