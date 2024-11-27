@@ -2,6 +2,7 @@ name: PR and Issue Validation
 
 on:
   pull_request:
+    # one limitation here is that there's no trigger to re-run any time we "connect" or "disconnect" an issue
     types: [opened, edited, labeled, unlabeled, synchronize]
   issues:
     types: [opened, edited, labeled, unlabeled]
@@ -45,14 +46,15 @@ jobs:
 
           # If the sum is 0, then no linked issues were found
           if [ "$LINKED_ISSUES" -eq "0" ]; then
-            echo "No linked issues found in the pull request."
+            echo "❌ No linked issues found in the pull request."
             exit 1
           elif [ "$LINKED_ISSUES" -lt "0" ]; then
-            echo "Error: More disconnected events than connected events. This shouldn't be possible and likely indicates a bi ol' 🪲"
+            echo "Error: More disconnected events than connected events. This shouldn't be possible and likely indicates a big ol' 🪲"
             exit 1
           else
             echo "Linked issues found: $LINKED_ISSUES"
           fi
+
   validate-issue:
     runs-on: ubuntu-latest
     steps:
