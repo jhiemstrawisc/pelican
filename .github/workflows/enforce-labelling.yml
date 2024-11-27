@@ -3,7 +3,7 @@ name: PR and Issue Validation
 on:
   pull_request:
     # one limitation here is that there's no trigger to re-run any time we "connect" or "disconnect" an issue
-    types: [opened, edited, labeled, unlabeled, synchronize]
+    types: [opened, edited, labeled, unlabeled, commented]
   issues:
     types: [opened, edited, labeled, unlabeled, closed]
 
