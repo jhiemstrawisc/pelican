@@ -28,9 +28,12 @@ jobs:
           PR_NUMBER=$(jq -r '.pull_request.number' $GITHUB_EVENT_PATH)
           REPO_OWNER=$(jq -r '.repository.owner.login' $GITHUB_EVENT_PATH)
           REPO_NAME=$(jq -r '.repository.name' $GITHUB_EVENT_PATH)
-          LINKED_ISSUES=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/issues/$PR_NUMBER/timeline" \
-            | jq '[.[] | select(.event == "cross-referenced") | .source.issue.number] | length')
+
+          TIMELINE_JSON=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/issues/$PR_NUMBER/timeline")
+          echo "Timeline JSON: $TIMELINE_JSON"
+
+          LINKED_ISSUES=$(echo "$TIMELINE_JSON" | jq '[.[] | select(.event == "cross-referenced") | .source.issue.number] | length')
           if [ "$LINKED_ISSUES" -eq "0" ]; then
             echo "No linked issues found in the pull request."
             exit 1
