@@ -1,0 +1,47 @@
+name: PR and Issue Validation
+
+on:
+  pull_request:
+    types: [opened, edited, labeled, unlabeled, synchronize]
+  issues:
+    types: [opened, edited, labeled, unlabeled]
+
+jobs:
+  validate-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v2
+
+      - name: Validate PR has labels
+        id: check_labels
+        run: |
+          PR_LABELS=$(jq -r '.pull_request.labels | length' $GITHUB_EVENT_PATH)
+          if [ "$PR_LABELS" -eq "0" ]; then
+            echo "No labels found on the pull request."
+            exit 1
+          fi
+
+      - name: Validate PR is linked to an issue
+        id: check_linked_issues
+        run: |
+          PR_BODY=$(jq -r '.pull_request.body' $GITHUB_EVENT_PATH)
+          if ! echo "$PR_BODY" | grep -qE "#[0-9]+"; then
+            echo "No linked issues found in the pull request description."
+            exit 1
+          fi
+
+  validate-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v2
+
+      - name: Validate issue has labels
+        id: check_labels
+        run: |
+          ISSUE_LABELS=$(jq -r '.issue.labels | length' $GITHUB_EVENT_PATH)
+          if [ "$ISSUE_LABELS" -eq "0" ]; then
+            echo "No labels found on the issue."
+            exit 1
+          fi
