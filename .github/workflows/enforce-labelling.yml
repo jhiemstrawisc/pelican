@@ -36,9 +36,9 @@ jobs:
           LINKED_ISSUES=$(echo "$TIMELINE_JSON" | jq '
             reduce .[] as $event (
               {};
-              if $event.event == "cross-referenced" or $event.event == "connected" then
+              if ($event.event == "cross-referenced" or $event.event == "connected") and ($event.source.issue != null) then
                 .[$event.source.issue.number] = true
-              elif $event.event == "unlinked" then
+              elif $event.event == "unlinked" and ($event.source.issue != null) then
                 del(.[$event.source.issue.number])
               else
                 .
