@@ -1272,6 +1272,238 @@ definitions:
         format: date-time
         description: Timestamp when this metadata record was last refreshed locally
         example: "2025-02-15T18:22:00Z"
+  LotPath:
+    type: object
+    description: A path associated with a Lot
+    properties:
+      path:
+        type: string
+        description: The filesystem path
+        example: "/test/data"
+      recursive:
+        type: boolean
+        description: Whether the path applies recursively to subdirectories
+        example: true
+      lot_name:
+        type: string
+        description: The name of the lot this path belongs to (returned by queries, not used when creating lots)
+        example: "test-lot"
+  Int64FromFloat:
+    type: object
+    description: A helper structure for int64 values that may be represented as floats in JSON
+    properties:
+      Value:
+        type: integer
+        format: int64
+        example: 1000
+  UsageMapFloat:
+    type: object
+    description: Usage statistics in floating point (for storage in GB)
+    properties:
+      self_contrib:
+        type: number
+        format: float
+        description: Direct contribution from this lot
+        example: 10.5
+      children_contrib:
+        type: number
+        format: float
+        description: Contribution from child lots
+        example: 5.3
+      total:
+        type: number
+        format: float
+        description: Total usage (self + children)
+        example: 15.8
+  UsageMapInt:
+    type: object
+    description: Usage statistics in integers (for object counts)
+    properties:
+      self_contrib:
+        $ref: "#/definitions/Int64FromFloat"
+      children_contrib:
+        $ref: "#/definitions/Int64FromFloat"
+      total:
+        $ref: "#/definitions/Int64FromFloat"
+  MPA:
+    type: object
+    description: Management Policy Attributes for a Lot
+    properties:
+      dedicated_GB:
+        type: number
+        format: float
+        description: Dedicated storage in gigabytes
+        example: 100.0
+      opportunistic_GB:
+        type: number
+        format: float
+        description: Opportunistic storage in gigabytes
+        example: 50.0
+      max_num_objects:
+        $ref: "#/definitions/Int64FromFloat"
+      creation_time:
+        $ref: "#/definitions/Int64FromFloat"
+      expiration_time:
+        $ref: "#/definitions/Int64FromFloat"
+      deletion_time:
+        $ref: "#/definitions/Int64FromFloat"
+  LotValueMapFloat:
+    type: object
+    description: Maps a lot name to a float value
+    properties:
+      lot_name:
+        type: string
+        example: "parent-lot"
+      value:
+        type: number
+        format: float
+        example: 100.0
+  LotValueMapInt:
+    type: object
+    description: Maps a lot name to an integer value
+    properties:
+      lot_name:
+        type: string
+        example: "parent-lot"
+      value:
+        $ref: "#/definitions/Int64FromFloat"
+  RestrictiveMPA:
+    type: object
+    description: The most restrictive Management Policy Attributes among parent lots
+    properties:
+      dedicated_GB:
+        $ref: "#/definitions/LotValueMapFloat"
+      opportunistic_GB:
+        $ref: "#/definitions/LotValueMapFloat"
+      max_num_objects:
+        $ref: "#/definitions/LotValueMapInt"
+      creation_time:
+        $ref: "#/definitions/LotValueMapInt"
+      expiration_time:
+        $ref: "#/definitions/LotValueMapInt"
+      deletion_time:
+        $ref: "#/definitions/LotValueMapInt"
+  LotUsage:
+    type: object
+    description: Current usage statistics for a Lot
+    properties:
+      GB_being_written:
+        $ref: "#/definitions/UsageMapFloat"
+      objects_being_written:
+        $ref: "#/definitions/UsageMapInt"
+      dedicated_GB:
+        $ref: "#/definitions/UsageMapFloat"
+      opportunistic_GB:
+        $ref: "#/definitions/UsageMapFloat"
+      num_objects:
+        $ref: "#/definitions/UsageMapInt"
+      total_GB:
+        $ref: "#/definitions/UsageMapFloat"
+  Lot:
+    type: object
+    description: A Lot represents a logical unit of storage in a Pelican cache
+    required:
+      - lot_name
+      - parents
+    properties:
+      lot_name:
+        type: string
+        description: Unique identifier for the lot
+        example: "test-lot"
+      owner:
+        type: string
+        description: The issuer URL of the lot's data owner
+        example: "https://issuer.example.com"
+      owners:
+        type: array
+        description: List of all owners (derived from parent lots)
+        items:
+          type: string
+        example: ["https://issuer.example.com"]
+      parents:
+        type: array
+        description: List of parent lot names
+        items:
+          type: string
+        example: ["root"]
+      children:
+        type: array
+        description: List of child lot names (read-only, derived)
+        items:
+          type: string
+        example: ["child-lot-1", "child-lot-2"]
+      paths:
+        type: array
+        description: List of paths associated with this lot
+        items:
+          $ref: "#/definitions/LotPath"
+      management_policy_attrs:
+        $ref: "#/definitions/MPA"
+      restrictive_management_policy_attrs:
+        $ref: "#/definitions/RestrictiveMPA"
+      usage:
+        $ref: "#/definitions/LotUsage"
+  ParentUpdate:
+    type: object
+    description: An update to a lot's parent relationship
+    required:
+      - current
+      - new
+    properties:
+      current:
+        type: string
+        description: The current parent lot name
+        example: "old-parent"
+      new:
+        type: string
+        description: The new parent lot name
+        example: "new-parent"
+  PathUpdate:
+    type: object
+    description: An update to a lot's path
+    required:
+      - current
+      - new
+      - recursive
+    properties:
+      current:
+        type: string
+        description: The current path
+        example: "/old/path"
+      new:
+        type: string
+        description: The new path
+        example: "/new/path"
+      recursive:
+        type: boolean
+        description: Whether the path applies recursively
+        example: true
+  LotUpdate:
+    type: object
+    description: Updates to apply to an existing Lot
+    required:
+      - lot_name
+    properties:
+      lot_name:
+        type: string
+        description: Name of the lot to update
+        example: "test-lot"
+      owner:
+        type: string
+        description: New owner for the lot (currently ignored by Pelican)
+        example: "https://new-issuer.example.com"
+      parents:
+        type: array
+        description: Parent updates to apply
+        items:
+          $ref: "#/definitions/ParentUpdate"
+      paths:
+        type: array
+        description: Path updates to apply (currently not supported by Pelican)
+        items:
+          $ref: "#/definitions/PathUpdate"
+      management_policy_attrs:
+        $ref: "#/definitions/MPA"
 
 tags:
   - name: auth
@@ -1294,6 +1526,8 @@ tags:
     description: APIs for managing collections of objects
   - name: groups
     description: APIs for managing user groups
+  - name: lotman
+    description: APIs for managing Lot storage resources in Pelican caches
 paths:
   /health:
     get:
@@ -4169,3 +4403,201 @@ paths:
           description: Internal server error
           schema:
             $ref: "#/definitions/ErrorModelV2"
+
+  # Lotman APIs
+  /lotman/getLotJSON:
+    get:
+      tags:
+        - lotman
+      summary: Get information about a Lot
+      description: >-
+        Retrieve detailed information about a Lot, including its configuration,
+        parent/child relationships, paths, management policy attributes, and usage statistics.
+
+
+        The `recursive` parameter controls whether to include information about child lots
+        in the response.
+      produces:
+        - application/json
+      parameters:
+        - name: lotName
+          in: query
+          description: The name of the lot to retrieve
+          required: true
+          type: string
+          example: "test-lot"
+        - name: recursive
+          in: query
+          description: Whether to recursively include child lot information
+          required: false
+          type: boolean
+          default: false
+          example: true
+      responses:
+        "200":
+          description: Lot information retrieved successfully
+          schema:
+            $ref: "#/definitions/Lot"
+        "400":
+          description: Bad request (missing or invalid parameters)
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: Internal server error
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+  /lotman/createLot:
+    put:
+      tags:
+        - lotman
+      summary: Create a new Lot
+      description: >-
+        `Authorization Required`
+
+
+        Create a new Lot with the specified configuration. The request must include
+        a valid authorization token with the `lot.create` scope.
+
+
+        **Important Notes:**
+
+        - Only one path per lot is currently supported by Pelican
+
+        - The `owner` field in the request is ignored; the owner is automatically set
+          to the issuer of the authorization token
+
+        - The `parents` field in the request is ignored; the parent is automatically
+          determined from the namespace hierarchy associated with the lot's path
+
+
+        The token must be signed by either the federation (for root-level lots) or
+        by an owner of a parent lot.
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      parameters:
+        - in: body
+          name: lot
+          description: The lot configuration to create
+          required: true
+          schema:
+            $ref: "#/definitions/Lot"
+      responses:
+        "200":
+          description: Lot created successfully
+          schema:
+            $ref: "#/definitions/SuccessModelV2"
+        "400":
+          description: Bad request (invalid lot configuration or multiple paths)
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: Forbidden (missing or invalid authorization token)
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: Internal server error
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+      security:
+        - Bearer: []
+  /lotman/updateLot:
+    put:
+      tags:
+        - lotman
+      summary: Update an existing Lot
+      description: >-
+        `Authorization Required`
+
+
+        Update the configuration of an existing Lot. The request must include
+        a valid authorization token with the `lot.modify` scope.
+
+
+        **Important Notes:**
+
+        - The `owner` field is ignored; Pelican determines ownership internally
+
+        - The `paths` field is currently not supported and will be ignored
+
+        - Parent relationships and management policy attributes can be updated
+
+
+        The token must be signed by an owner of a parent lot or an authorized caller.
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      parameters:
+        - in: body
+          name: lotUpdate
+          description: The lot updates to apply
+          required: true
+          schema:
+            $ref: "#/definitions/LotUpdate"
+      responses:
+        "200":
+          description: Lot updated successfully
+          schema:
+            $ref: "#/definitions/SuccessModelV2"
+        "400":
+          description: Bad request (invalid update configuration)
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: Forbidden (missing or invalid authorization token)
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: Internal server error
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+      security:
+        - Bearer: []
+  /lotman/deleteLotsRecursive:
+    delete:
+      tags:
+        - lotman
+      summary: Delete a Lot and its children recursively
+      description: >-
+        `Authorization Required`
+
+
+        Delete a Lot and all of its child lots recursively. The request must include
+        a valid authorization token with the `lot.delete` scope.
+
+
+        The token must be signed by an owner of a parent lot or an authorized caller.
+
+
+        **Warning:** This operation is irreversible and will delete the lot and all
+        its children.
+      produces:
+        - application/json
+      parameters:
+        - name: lotName
+          in: query
+          description: The name of the lot to delete
+          required: true
+          type: string
+          example: "test-lot"
+      responses:
+        "200":
+          description: Lot deleted successfully
+          schema:
+            $ref: "#/definitions/SuccessModelV2"
+        "400":
+          description: Bad request (missing lot name)
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: Forbidden (missing or invalid authorization token)
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: Internal server error
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+      security:
+        - Bearer: []
