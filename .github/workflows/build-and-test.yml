@@ -61,6 +61,9 @@ jobs:
 
             brianaydemir/pelicanplatform-pelican)
               REGISTRY_REPO="brian.aydemir.r1" ;;
+
+            jhiemstrawisc/pelican)
+              REGISTRY_REPO="jhiemstra" ;;
           esac
 
           # By default, we assume that we are unable to push containers.
