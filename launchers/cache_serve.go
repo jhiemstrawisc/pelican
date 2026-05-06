@@ -85,15 +85,12 @@ func CacheServe(ctx context.Context, engine *gin.Engine, egrp *errgroup.Group, m
 			lotman.RegisterLotman(ctx, engine.Group("/", web_ui.ServerHeaderMiddleware))
 		}
 
-		// Until https://github.com/PelicanPlatform/lotman/issues/24 is closed, we can only really logic over
-		// top-level prefixes because enumerating all object "directories" under a given federation prefix is
-		// infeasible, but is currently the only way to nest namespaces in Lotman such that a sub namespace
-		// can be associated with a top-level prefix.
-		// To that end, we need to filter out any nested namespaces from the cache server's namespace ads.
-		uniqueTopPrefixes := server_utils.FilterTopLevelPrefixes(cacheServer.GetNamespaceAds())
-
+		// Pelican now nests namespace lots by path-prefix containment, so
+		// the cache feeds the full namespace ad list straight into lotman.
+		// FilterTopLevelPrefixes (used previously to flatten the list) is
+		// no longer needed here.
 		// Bind the c library funcs to Go, instantiate lots, set up the Lotman database, etc
-		if success := lotman.InitLotman(uniqueTopPrefixes); !success {
+		if success := lotman.InitLotman(cacheServer.GetNamespaceAds()); !success {
 			return nil, errors.New("Failed to initialize lotman")
 		}
 	}
