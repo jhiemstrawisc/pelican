@@ -93,6 +93,15 @@ func CacheServe(ctx context.Context, engine *gin.Engine, egrp *errgroup.Group, m
 		if success := lotman.InitLotman(cacheServer.GetNamespaceAds()); !success {
 			return nil, errors.New("Failed to initialize lotman")
 		}
+
+		// Background loops:
+		//   - LaunchRenewalRoutine periodically extends per-namespace lot
+		//     coverage so no namespace is left without an active lot.
+		//   - LaunchLotGcRoutine periodically removes lots whose
+		//     deletion_time + Lotman.LotRecordRetention has passed.
+		// Both exit when ctx is done.
+		lotman.LaunchRenewalRoutine(ctx, cacheServer.GetNamespaceAds)
+		lotman.LaunchLotGcRoutine(ctx)
 	}
 
 	// Don't perform Broker operations for site-local caches.

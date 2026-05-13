@@ -81,15 +81,43 @@ var (
 	// runtime will handle the memory management for the *unsafe.Pointer.
 	LotmanGetLotOwners func(lotName string, recursive bool, output *unsafe.Pointer, errMsg *[]byte) int32
 	// Here, getSelf means get the lot proper if it's a self parent
-	LotmanGetLotParents   func(lotName string, recursive bool, getSelf bool, output *unsafe.Pointer, errMsg *[]byte) int32
-	LotmanGetLotChildren  func(lotName string, recursive bool, getSelf bool, output *unsafe.Pointer, errMsg *[]byte) int32
-	LotmanGetLotsFromDir  func(dir string, recursive bool, queryTimeMs int64, output *unsafe.Pointer, errMsg *[]byte) int32
-	LotmanListAllLots     func(output *unsafe.Pointer, errMsg *[]byte) int32
-	LotmanGetLotsPastExp  func(recursive bool, output *unsafe.Pointer, errMsg *[]byte) int32
-	LotmanGetLotsPastDel  func(recursive bool, output *unsafe.Pointer, errMsg *[]byte) int32
-	LotmanGetLotsPastDed  func(recursiveQuota bool, recursiveChildren bool, output *unsafe.Pointer, hierarchical bool, errMsg *[]byte) int32
-	LotmanGetLotsPastOpp  func(recursiveQuota bool, recursiveChildren bool, output *unsafe.Pointer, hierarchical bool, errMsg *[]byte) int32
-	LotmanGetLotsPastObj  func(recursiveQuota bool, recursiveChildren bool, output *unsafe.Pointer, hierarchical bool, errMsg *[]byte) int32
+	LotmanGetLotParents  func(lotName string, recursive bool, getSelf bool, output *unsafe.Pointer, errMsg *[]byte) int32
+	LotmanGetLotChildren func(lotName string, recursive bool, getSelf bool, output *unsafe.Pointer, errMsg *[]byte) int32
+	LotmanGetLotsFromDir func(dir string, recursive bool, queryTimeMs int64, output *unsafe.Pointer, errMsg *[]byte) int32
+	LotmanListAllLots    func(output *unsafe.Pointer, errMsg *[]byte) int32
+	// Window-aware variant of lotman_get_lots_from_dir (lotman PR #52). Returns a
+	// JSON array of full lot objects (same shape as lotman_get_lot_as_json with
+	// recursive=false) for every lot that wins the longest-prefix path-resolution
+	// contest at any instant in the half-open window [timeLoMs, timeHiMs). Used
+	// by the renewal scheduler to enumerate just the lots that touch a given
+	// namespace path during the planning window, replacing the O(all lots)
+	// listAllLotsFull walk.
+	LotmanGetLotsForPath func(path string, recursive bool, timeLoMs int64, timeHiMs int64, includeReclaimed bool, output *[]byte, errMsg *[]byte) int32
+	// past_exp/past_del signatures gained a leading `int64 query_time` in lotman
+	// PR #52 to let callers reason about future or past states of the ledger
+	// (preview which lots will be expired/deletable by some timestamp). Pass
+	// wall-clock now() in milliseconds for the historical "as of now" semantics.
+	// `include_reclaimed` was added in v0.0.5+; cleanup loops should pass false
+	// to avoid repeatedly draining lots that have already been reclaimed.
+	LotmanGetLotsPastExp func(queryTimeMs int64, recursive bool, includeReclaimed bool, output *unsafe.Pointer, errMsg *[]byte) int32
+	LotmanGetLotsPastDel func(queryTimeMs int64, recursive bool, includeReclaimed bool, output *unsafe.Pointer, errMsg *[]byte) int32
+	LotmanGetLotsPastDed func(recursiveQuota bool, recursiveChildren bool, includeReclaimed bool, output *unsafe.Pointer, hierarchical bool, errMsg *[]byte) int32
+	LotmanGetLotsPastOpp func(recursiveQuota bool, recursiveChildren bool, includeReclaimed bool, output *unsafe.Pointer, hierarchical bool, errMsg *[]byte) int32
+	LotmanGetLotsPastObj func(recursiveQuota bool, recursiveChildren bool, includeReclaimed bool, output *unsafe.Pointer, hierarchical bool, errMsg *[]byte) int32
+
+	// Reclamation ledger (lotman v0.0.5+). LotmanReclaimLot records that the
+	// caller (typically the purge plugin) is no longer attributing bytes to
+	// the named lot subtree; downstream past_* queries with
+	// include_reclaimed=false ignore reclaimed lots.
+	LotmanReclaimLot func(lotName string, reclaimedAtMs int64, reason string, errMsg *[]byte) int32
+
+	// Usage update entry points. Both accept a delta_mode bool: when false,
+	// the supplied JSON describes ABSOLUTE current usage (preferred); when
+	// true, it describes additive deltas. Pelican (and the purge plugin)
+	// always pass delta_mode=false so that on-disk state is the source of
+	// truth and missed updates self-heal on the next reporting tick.
+	LotmanUpdateLotUsage      func(updateJSON string, deltaMode bool, errMsg *[]byte) int32
+	LotmanUpdateLotUsageByDir func(updateJSON string, deltaMode bool, queryTimeMs int64, errMsg *[]byte) int32
 
 	// Functions returning a single JSON document via char **
 	LotmanGetPolicyAttributes  func(requestJSON string, output *[]byte, errMsg *[]byte) int32
@@ -801,20 +829,47 @@ func configLotsFromFedPrefixesNested(nsAds []server_structs.NamespaceAdV2, feder
 }
 
 // computeRootDedicatedGB picks the per-axis dedicated quota for the root
-// lot in GB. When at least one cache disk is detected we use the full
-// disk total (so root's quota naturally contains every child's
-// allocation). When no disks are detected (tests, early startup) we fall
-// back to Cache.HighWaterMark so the root lot is still non-zero and
-// strict-hierarchy axiom 1 remains satisfiable.
+// lot in GB. The cache cannot actually retain more than its HighWaterMark
+// before xrootd's pfc purger starts evicting, so handing the lot system
+// "raw disk total" as the root dedicated quota would let lots provision
+// space the cache can never honour at steady state. The result is
+// therefore the smaller of:
+//   - bytesToGigabytes(totalDiskSpaceB) (the physical capacity of the
+//     cache's data disks), clamped down by the parsed
+//     Cache.HighWaterMark fraction/value where one is configured; and
+//   - any explicit Cache.FilesMaxSize ceiling.
+//
+// When no cache disks are detected (tests, early startup) we fall back
+// to Cache.HighWaterMark interpreted as an absolute byte value so the
+// root lot is still non-zero and lotman's first axiom remains
+// satisfiable.
 func computeRootDedicatedGB(totalDiskSpaceB uint64) float64 {
 	rootDedGB := bytesToGigabytes(totalDiskSpaceB)
+	hwmStr := param.Cache_HighWaterMark.GetString()
 	if totalDiskSpaceB == 0 {
-		hwmStr := param.Cache_HighWaterMark.GetString()
 		if hwmStr != "" {
 			hwmBytes, hwmErr := convertWatermarkToBytes(hwmStr, 0)
 			if hwmErr == nil && hwmBytes > 0 {
 				rootDedGB = bytesToGigabytes(hwmBytes)
 				log.Debugf("No cache disks detected; using HighWaterMark (%s = %.2f GB) as root lot quota", hwmStr, rootDedGB)
+			}
+		}
+		return rootDedGB
+	}
+	// Clamp to HighWaterMark when one is configured: anything above HWM
+	// is unreachable steady-state because xrootd will purge it.
+	if hwmStr != "" {
+		if hwmBytes, hwmErr := convertWatermarkToBytes(hwmStr, totalDiskSpaceB); hwmErr == nil && hwmBytes > 0 {
+			if clamped := bytesToGigabytes(hwmBytes); clamped < rootDedGB {
+				rootDedGB = clamped
+			}
+		}
+	}
+	// Clamp to FilesMaxSize when set (absolute byte value or percent).
+	if maxStr := param.Cache_FilesMaxSize.GetString(); maxStr != "" {
+		if maxBytes, maxErr := convertWatermarkToBytes(maxStr, totalDiskSpaceB); maxErr == nil && maxBytes > 0 {
+			if clamped := bytesToGigabytes(maxBytes); clamped < rootDedGB {
+				rootDedGB = clamped
 			}
 		}
 	}
@@ -1157,8 +1212,9 @@ func setLotmanContextFlags() error {
 	return nil
 }
 
-// minLotmanVersion is the earliest lotman release that supports
-// strict_hierarchy with parent_attributions (lotman PR #43 / v0.0.5).
+// minLotmanVersion is the earliest lotman release that exposes every
+// FFI symbol Pelican's lotman integration registers below. Bump this
+// whenever a new symbol is added to InitLotman.
 const minLotmanVersion = "v0.0.5"
 
 // checkLotmanVersionCompatibility returns true when the loaded libLotMan.so
@@ -1217,12 +1273,16 @@ func InitLotman(adsFromFed []server_structs.NamespaceAdV2) bool {
 	purego.RegisterLibFunc(&LotmanGetLotParents, lotmanLib, "lotman_get_parent_names")
 	purego.RegisterLibFunc(&LotmanGetLotChildren, lotmanLib, "lotman_get_children_names")
 	purego.RegisterLibFunc(&LotmanGetLotsFromDir, lotmanLib, "lotman_get_lots_from_dir")
+	purego.RegisterLibFunc(&LotmanGetLotsForPath, lotmanLib, "lotman_get_lots_for_path")
 	purego.RegisterLibFunc(&LotmanListAllLots, lotmanLib, "lotman_list_all_lots")
 	purego.RegisterLibFunc(&LotmanGetLotsPastExp, lotmanLib, "lotman_get_lots_past_exp")
 	purego.RegisterLibFunc(&LotmanGetLotsPastDel, lotmanLib, "lotman_get_lots_past_del")
 	purego.RegisterLibFunc(&LotmanGetLotsPastDed, lotmanLib, "lotman_get_lots_past_ded")
 	purego.RegisterLibFunc(&LotmanGetLotsPastOpp, lotmanLib, "lotman_get_lots_past_opp")
 	purego.RegisterLibFunc(&LotmanGetLotsPastObj, lotmanLib, "lotman_get_lots_past_obj")
+	purego.RegisterLibFunc(&LotmanReclaimLot, lotmanLib, "lotman_reclaim_lot")
+	purego.RegisterLibFunc(&LotmanUpdateLotUsage, lotmanLib, "lotman_update_lot_usage")
+	purego.RegisterLibFunc(&LotmanUpdateLotUsageByDir, lotmanLib, "lotman_update_lot_usage_by_dir")
 	purego.RegisterLibFunc(&LotmanGetPolicyAttributes, lotmanLib, "lotman_get_policy_attributes")
 	purego.RegisterLibFunc(&LotmanGetLotDirs, lotmanLib, "lotman_get_lot_dirs")
 	purego.RegisterLibFunc(&LotmanGetLotUsage, lotmanLib, "lotman_get_lot_usage")
@@ -1381,6 +1441,9 @@ func InitLotman(adsFromFed []server_structs.NamespaceAdV2) bool {
 //	  } (REQUIRED)
 //	}
 func CreateLot(newLot *Lot, caller string) error {
+	if err := validateLotLifetime(newLot); err != nil {
+		return err
+	}
 	// Marshal the JSON into a string for the C function
 	lotJSON, err := json.Marshal(*newLot)
 	if err != nil {
@@ -1461,6 +1524,9 @@ func GetLot(lotName string, recursive bool) (*Lot, error) {
 //	  } (OPTIONAL)
 //	}
 func UpdateLot(lotUpdate *LotUpdate, caller string) error {
+	if err := validateLotUpdateLifetime(lotUpdate); err != nil {
+		return err
+	}
 	// Marshal the JSON into a string for the C function
 	updateJSON, err := json.Marshal(*lotUpdate)
 	if err != nil {
@@ -1741,6 +1807,39 @@ func GetLotsFromDir(dir string, recursive bool, queryTimeMs int64) ([]string, er
 	return drainStringList(&out), nil
 }
 
+// GetLotsForPath returns full Lot objects for every lot that "wins" the
+// longest-prefix path-resolution contest at any instant in the half-open
+// window [timeLoMs, timeHiMs). Two lots may both be returned when each owns
+// the path during disjoint sub-intervals of the window. When recursive is
+// true, each winner's ancestors are also included. When includeReclaimed is
+// false, lots reclaimed at or before timeLoMs are dropped entirely; lots
+// reclaimed mid-window have their effective active interval clipped before
+// the sweep. The result always contains at least one element: when no lot
+// wins anywhere in the window, the synthetic "default" lot is appended.
+//
+// This is the window-aware variant of GetLotsFromDir (lotman PR #52). The
+// renewal scheduler uses it to enumerate just the lots that touch a given
+// namespace path during its planning window, which lets it scope work to
+// O(active subtree size) instead of O(total lot rows).
+func GetLotsForPath(path string, recursive bool, timeLoMs, timeHiMs int64, includeReclaimed bool) ([]Lot, error) {
+	// 64 KiB is generous; a typical query returns 2-5 lots × ~1 KiB each.
+	// trimBuf scans for the trailing null terminator so an oversized buffer
+	// is harmless.
+	output := make([]byte, 65536)
+	errMsg := make([]byte, 2048)
+	ret := LotmanGetLotsForPath(path, recursive, timeLoMs, timeHiMs, includeReclaimed, &output, &errMsg)
+	if ret != 0 {
+		trimBuf(&errMsg)
+		return nil, errors.Errorf("error getting lots for path %s in window [%d, %d): %s", path, timeLoMs, timeHiMs, string(errMsg))
+	}
+	trimBuf(&output)
+	var lots []Lot
+	if err := json.Unmarshal(output, &lots); err != nil {
+		return nil, errors.Wrapf(err, "error unmarshalling lots-for-path JSON for %s", path)
+	}
+	return lots, nil
+}
+
 // pastLotsHelper centralises the past-quota query pattern.
 func pastLotsHelper(name string, fn func(*unsafe.Pointer, *[]byte) int32) ([]string, error) {
 	errMsg := make([]byte, 2048)
@@ -1753,43 +1852,133 @@ func pastLotsHelper(name string, fn func(*unsafe.Pointer, *[]byte) int32) ([]str
 	return drainStringList(&out), nil
 }
 
-// GetLotsPastExp returns all lots past their expiration_time. If recursive,
-// the most-restricting ancestor expiration_time is used.
-func GetLotsPastExp(recursive bool) ([]string, error) {
+// GetLotsPastExp returns all lots past their expiration_time relative to
+// the supplied queryTimeMs cutoff (a Unix timestamp in milliseconds). Pass
+// time.Now().UnixMilli() for the historical "as of now" semantics; pass a
+// future timestamp to preview which lots will be expired by then. If
+// recursive, the most-restricting ancestor expiration_time is used.
+// If includeReclaimed is false (the typical cleanup-loop value) lots with
+// a reclamations-ledger row whose reclaimed_at <= queryTimeMs are excluded.
+func GetLotsPastExp(queryTimeMs int64, recursive, includeReclaimed bool) ([]string, error) {
 	return pastLotsHelper("lots-past-exp", func(out *unsafe.Pointer, errMsg *[]byte) int32 {
-		return LotmanGetLotsPastExp(recursive, out, errMsg)
+		return LotmanGetLotsPastExp(queryTimeMs, recursive, includeReclaimed, out, errMsg)
 	})
 }
 
-// GetLotsPastDel returns all lots past their deletion_time.
-func GetLotsPastDel(recursive bool) ([]string, error) {
+// GetLotsPastDel returns all lots past their deletion_time relative to the
+// supplied queryTimeMs cutoff. See GetLotsPastExp for the meaning of
+// queryTimeMs and includeReclaimed.
+func GetLotsPastDel(queryTimeMs int64, recursive, includeReclaimed bool) ([]string, error) {
 	return pastLotsHelper("lots-past-del", func(out *unsafe.Pointer, errMsg *[]byte) int32 {
-		return LotmanGetLotsPastDel(recursive, out, errMsg)
+		return LotmanGetLotsPastDel(queryTimeMs, recursive, includeReclaimed, out, errMsg)
 	})
 }
 
 // GetLotsPastDed returns all lots past their dedicated_GB quota.
 // When hierarchical is true, recursiveQuota and recursiveChildren are ignored
 // (the hierarchical query path supersedes them) and results are returned
-// depth-ordered (deepest first).
-func GetLotsPastDed(recursiveQuota, recursiveChildren, hierarchical bool) ([]string, error) {
+// depth-ordered (deepest first). When hierarchical is true, reclaimed parents
+// are unconditionally excluded regardless of includeReclaimed.
+func GetLotsPastDed(recursiveQuota, recursiveChildren, includeReclaimed, hierarchical bool) ([]string, error) {
 	return pastLotsHelper("lots-past-ded", func(out *unsafe.Pointer, errMsg *[]byte) int32 {
-		return LotmanGetLotsPastDed(recursiveQuota, recursiveChildren, out, hierarchical, errMsg)
+		return LotmanGetLotsPastDed(recursiveQuota, recursiveChildren, includeReclaimed, out, hierarchical, errMsg)
 	})
 }
 
 // GetLotsPastOpp returns all lots past their opportunistic_GB quota.
-func GetLotsPastOpp(recursiveQuota, recursiveChildren, hierarchical bool) ([]string, error) {
+func GetLotsPastOpp(recursiveQuota, recursiveChildren, includeReclaimed, hierarchical bool) ([]string, error) {
 	return pastLotsHelper("lots-past-opp", func(out *unsafe.Pointer, errMsg *[]byte) int32 {
-		return LotmanGetLotsPastOpp(recursiveQuota, recursiveChildren, out, hierarchical, errMsg)
+		return LotmanGetLotsPastOpp(recursiveQuota, recursiveChildren, includeReclaimed, out, hierarchical, errMsg)
 	})
 }
 
 // GetLotsPastObj returns all lots past their max_num_objects quota.
-func GetLotsPastObj(recursiveQuota, recursiveChildren, hierarchical bool) ([]string, error) {
+func GetLotsPastObj(recursiveQuota, recursiveChildren, includeReclaimed, hierarchical bool) ([]string, error) {
 	return pastLotsHelper("lots-past-obj", func(out *unsafe.Pointer, errMsg *[]byte) int32 {
-		return LotmanGetLotsPastObj(recursiveQuota, recursiveChildren, out, hierarchical, errMsg)
+		return LotmanGetLotsPastObj(recursiveQuota, recursiveChildren, includeReclaimed, out, hierarchical, errMsg)
 	})
+}
+
+// ReclaimLot records a reclamations-ledger entry for the named lot and every
+// descendant in its subtree. After this call, lots in the subtree are skipped
+// by past_* queries called with includeReclaimed=false; their MPAs and usage
+// rows remain intact in the database. The default lot may NOT be reclaimed.
+//
+// Returns:
+//   - lotmanReclaimOK          (0): at least one new ledger row was added.
+//   - lotmanReclaimAlreadyDone  (1): every lot in the subtree was
+//     already reclaimed; no new row was added (still a success).
+//   - lotmanReclaimError       (-1): validation/authorization/storage error.
+//
+// Pelican itself never calls this from production code paths today --
+// reclamation is performed by the xrootd-lotman purge plugin once a lot's
+// bytes have actually been drained off disk. The wrapper exists for tests
+// and for future GC scheduling.
+func ReclaimLot(lotName string, reclaimedAtMs int64, reason, caller string) (int, error) {
+	errMsg := make([]byte, 2048)
+	callerMutex.Lock()
+	defer callerMutex.Unlock()
+	ret := LotmanSetContextStr("caller", caller, &errMsg)
+	if ret != 0 {
+		trimBuf(&errMsg)
+		return lotmanReclaimError, errors.Errorf("error setting caller for lot reclamation: %s", string(errMsg))
+	}
+	ret = LotmanReclaimLot(lotName, reclaimedAtMs, reason, &errMsg)
+	if ret == lotmanReclaimError {
+		trimBuf(&errMsg)
+		return lotmanReclaimError, errors.Errorf("error reclaiming lot %s: %s", lotName, string(errMsg))
+	}
+	return int(ret), nil
+}
+
+// Reclamation status sentinels matching lotman.h.
+const (
+	lotmanReclaimOK          = 0
+	lotmanReclaimAlreadyDone = 1
+	lotmanReclaimError       = -1
+)
+
+// UpdateLotUsage submits an absolute (delta_mode=false) or additive
+// (delta_mode=true) usage update keyed by lot name. updateJSON is the
+// pre-marshalled JSON document accepted by lotman_update_lot_usage.
+func UpdateLotUsage(updateJSON string, deltaMode bool, caller string) error {
+	errMsg := make([]byte, 2048)
+	callerMutex.Lock()
+	defer callerMutex.Unlock()
+	ret := LotmanSetContextStr("caller", caller, &errMsg)
+	if ret != 0 {
+		trimBuf(&errMsg)
+		return errors.Errorf("error setting caller for usage update: %s", string(errMsg))
+	}
+	ret = LotmanUpdateLotUsage(updateJSON, deltaMode, &errMsg)
+	if ret != 0 {
+		trimBuf(&errMsg)
+		return errors.Errorf("error updating lot usage: %s", string(errMsg))
+	}
+	return nil
+}
+
+// UpdateLotUsageByDir submits a path-keyed usage update; lotman resolves each
+// directory to its currently owning lot at the supplied queryTimeMs (0 = now)
+// using longest-prefix matching across every lot's paths.
+func UpdateLotUsageByDir(updateJSON string, deltaMode bool, queryTimeMs int64, caller string) error {
+	if queryTimeMs == 0 {
+		queryTimeMs = time.Now().UnixMilli()
+	}
+	errMsg := make([]byte, 2048)
+	callerMutex.Lock()
+	defer callerMutex.Unlock()
+	ret := LotmanSetContextStr("caller", caller, &errMsg)
+	if ret != 0 {
+		trimBuf(&errMsg)
+		return errors.Errorf("error setting caller for by-dir usage update: %s", string(errMsg))
+	}
+	ret = LotmanUpdateLotUsageByDir(updateJSON, deltaMode, queryTimeMs, &errMsg)
+	if ret != 0 {
+		trimBuf(&errMsg)
+		return errors.Errorf("error updating lot usage by dir: %s", string(errMsg))
+	}
+	return nil
 }
 
 // GetPolicyAttributes returns the most-restrictive MPA values for each axis

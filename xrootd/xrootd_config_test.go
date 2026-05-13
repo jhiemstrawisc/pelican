@@ -868,3 +868,32 @@ func TestConfigUpdatesHealthOKWhenFresh(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, metrics.StatusOK.String(), status)
 }
+
+// purgeColdFilesAgeFromMaxLotLifetime is the small validator used by
+// ConfigXrootd to translate Lotman.MaxLotLifetime into the
+// pfc.diskusage purgecoldfiles age. xrootd accepts ages in [1h, 360d]
+// (see XrdPfcConfiguration.cc::a2tm); below or above that range the
+// directive silently rejects, so Pelican must reject at config time
+// rather than emit an unparsable directive.
+func TestPurgeColdFilesAgeFromMaxLotLifetime(t *testing.T) {
+	// Domain validation has moved to config/config.go; this test
+	// pins only the formatter behaviour. See TestValidateLotmanConfig
+	// (or equivalent) in pelican/config for [1h, 360d] rejection.
+	cases := []struct {
+		name string
+		in   time.Duration
+		want string
+	}{
+		{"one hour minimum accepted", time.Hour, "3600s"},
+		{"one day accepted", 24 * time.Hour, "86400s"},
+		{"week accepted", 7 * 24 * time.Hour, "604800s"},
+		{"360 days maximum accepted", 360 * 24 * time.Hour, "31104000s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := purgeColdFilesAgeFromMaxLotLifetime(tc.in)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

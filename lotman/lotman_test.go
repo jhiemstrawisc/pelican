@@ -74,8 +74,8 @@ func setupLotmanFromConf(t *testing.T, readConfig bool, name string, discUrl str
 	// when storing a lot. The auto-created `default` and `root` lots derive
 	// their timestamps from these params, so we must ensure non-zero defaults
 	// regardless of whether the embedded yaml is loaded.
-	require.NoError(t, param.Lotman_DefaultLotExpirationLifetime.Set(2016*time.Hour))
-	require.NoError(t, param.Lotman_DefaultLotDeletionLifetime.Set(4032*time.Hour))
+	require.NoError(t, param.Lotman_DefaultLotExpirationLifetime.Set(168*time.Hour))
+	require.NoError(t, param.Lotman_DefaultLotDeletionLifetime.Set(168*time.Hour))
 	if readConfig {
 		viper.SetConfigType("yaml")
 		err := viper.ReadConfig(strings.NewReader(yamlMockup))
@@ -955,6 +955,58 @@ func TestConvertWatermarkToBytes(t *testing.T) {
 	}
 }
 
+// TestComputeRootDedicatedGB_ClampsToHWM verifies that the root lot's
+// dedicated quota is clamped down to Cache.HighWaterMark and
+// Cache.FilesMaxSize when those would be lower than raw disk total,
+// since xrootd will purge once usage exceeds those thresholds.
+func TestComputeRootDedicatedGB_ClampsToHWM(t *testing.T) {
+	t.Cleanup(test_utils.SetupTestLogging(t))
+
+	totalDisk := gigabytesToBytes(1000.0) // 1 TB
+
+	t.Run("no disk falls back to HWM as absolute bytes", func(t *testing.T) {
+		server_utils.ResetTestState()
+		defer server_utils.ResetTestState()
+		require.NoError(t, param.Cache_HighWaterMark.Set("100g"))
+		got := computeRootDedicatedGB(0)
+		require.InDelta(t, 100.0, got, 0.001)
+	})
+
+	t.Run("HWM percent clamps below disk total", func(t *testing.T) {
+		server_utils.ResetTestState()
+		defer server_utils.ResetTestState()
+		require.NoError(t, param.Cache_HighWaterMark.Set("90"))
+		got := computeRootDedicatedGB(totalDisk)
+		// 90% of 1000 GB = 900 GB
+		require.InDelta(t, 900.0, got, 0.001)
+	})
+
+	t.Run("HWM byte value clamps below disk total", func(t *testing.T) {
+		server_utils.ResetTestState()
+		defer server_utils.ResetTestState()
+		require.NoError(t, param.Cache_HighWaterMark.Set("500g"))
+		got := computeRootDedicatedGB(totalDisk)
+		require.InDelta(t, 500.0, got, 0.001)
+	})
+
+	t.Run("HWM higher than disk uses disk total", func(t *testing.T) {
+		server_utils.ResetTestState()
+		defer server_utils.ResetTestState()
+		require.NoError(t, param.Cache_HighWaterMark.Set("100"))
+		got := computeRootDedicatedGB(totalDisk)
+		require.InDelta(t, 1000.0, got, 0.001)
+	})
+
+	t.Run("FilesMaxSize clamps below HWM-clamped disk total", func(t *testing.T) {
+		server_utils.ResetTestState()
+		defer server_utils.ResetTestState()
+		require.NoError(t, param.Cache_HighWaterMark.Set("90"))
+		require.NoError(t, param.Cache_FilesMaxSize.Set("250g"))
+		got := computeRootDedicatedGB(totalDisk)
+		require.InDelta(t, 250.0, got, 0.001)
+	})
+}
+
 // TestStrictHierarchyContextSet verifies that InitLotman installs the
 // strict-hierarchy execution context (PR-2): the three flags
 // strict_hierarchy, contraction_policy, and admin_override must each be
@@ -1030,6 +1082,17 @@ func TestInitLotmanNestedNamespaces(t *testing.T) {
 	defer cleanup()
 	require.True(t, success)
 
+	// Lots are named with v4 UUIDs internally; resolve UUID names by
+	// asking lotman which lot owns the namespace path right now.
+	nowMs := time.Now().UnixMilli()
+	nameForPath := func(p string) string {
+		owners, err := GetLotsFromDir(p, false, nowMs)
+		require.NoErrorf(t, err, "GetLotsFromDir(%q)", p)
+		require.NotEmptyf(t, owners, "no lot owns %q", p)
+		// owners[0] is the most-specific lot for the path.
+		return owners[0]
+	}
+
 	getLot := func(name string) Lot {
 		buf := make([]byte, 8192)
 		errBuf := make([]byte, 2048)
@@ -1044,13 +1107,16 @@ func TestInitLotmanNestedNamespaces(t *testing.T) {
 		return l
 	}
 
-	a := getLot("/a")
-	b := getLot("/a/b")
-	c := getLot("/c")
+	aName := nameForPath("/a")
+	bName := nameForPath("/a/b")
+	cName := nameForPath("/c")
+	a := getLot(aName)
+	b := getLot(bName)
+	c := getLot(cName)
 
 	// Parent linkage as computed by buildLotTree.
 	assert.Equal(t, []string{"root"}, a.Parents)
-	assert.Equal(t, []string{"/a"}, b.Parents)
+	assert.Equal(t, []string{aName}, b.Parents)
 	assert.Equal(t, []string{"root"}, c.Parents)
 
 	// (N+1) allocator: root has HighWaterMark=100GB (no Cache.DataLocations
@@ -1068,10 +1134,10 @@ func TestInitLotmanNestedNamespaces(t *testing.T) {
 	// ParentAttributions wired through to lotman: each child's attribution
 	// equals its own dedicated quota (axiom 1 trivially satisfied).
 	require.Contains(t, a.ParentAttributions, "root")
-	require.Contains(t, b.ParentAttributions, "/a")
+	require.Contains(t, b.ParentAttributions, aName)
 	require.Contains(t, c.ParentAttributions, "root")
 	assert.InDelta(t, 50.0, *a.ParentAttributions["root"].DedicatedGB, 1e-9)
-	assert.InDelta(t, 25.0, *b.ParentAttributions["/a"].DedicatedGB, 1e-9)
+	assert.InDelta(t, 25.0, *b.ParentAttributions[aName].DedicatedGB, 1e-9)
 	assert.InDelta(t, 50.0, *c.ParentAttributions["root"].DedicatedGB, 1e-9)
 
 	// Sentinel propagation (root.opportunistic = -1, root.max_num_objects = -1):
