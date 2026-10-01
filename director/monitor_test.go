@@ -132,8 +132,16 @@ func TestCacheTestPlan(t *testing.T) {
 	plan, err := cacheTestPlan(mustParseURL(t, "https://cache.example.com:8442"))
 	require.NoError(t, err)
 
-	require.Len(t, plan.Steps, 1)
+	// Two reads of the same object: cold, then warm. A cache is two different
+	// systems depending on whether it already holds what was asked for.
+	require.Len(t, plan.Steps, 2)
 	assert.Equal(t, server_utils.ProbeOpRead, plan.Steps[0].Op)
+	assert.Equal(t, server_utils.ProbeOpRead, plan.Steps[1].Op)
+
+	// Both steps must address the same object, or the second one misses too and
+	// the hit path stays unprobed.
+	assert.NotEmpty(t, plan.ObjectPath,
+		"the plan has to name the object up front, or each read invents its own and both miss")
 
 	// The monitoring namespace is public, so a client reading it presents no
 	// token; presenting one would test a path the client never takes.
@@ -153,6 +161,124 @@ func TestCacheTestPlan(t *testing.T) {
 		server_structs.EdgeUpstreamFetch,
 		server_structs.EdgeCacheWrite,
 	}, plan.Steps[0].Edges)
+
+	assert.Equal(t, []server_structs.Edge{
+		server_structs.EdgeFront,
+		server_structs.EdgeCacheHit,
+	}, plan.Steps[1].Edges,
+		"the second read is served from local disk, so it covers the hit path and nothing upstream")
+}
+
+// Both branches of the cache path have to end up covered by one run.
+//
+// The operational failure behind #3503 was object fetches through caches
+// breaking for hits alone, which every probe missed because they all ran cold.
+// A single cold read leaves EdgeCacheHit uncovered; a cold read followed by a
+// warm one covers both.
+func TestCacheTestPlanCoversHitAndMiss(t *testing.T) {
+	server_utils.ResetTestState()
+	t.Cleanup(server_utils.ResetTestState)
+	require.NoError(t, param.Server_Hostname.Set("director-1.example.com"))
+
+	plan, err := cacheTestPlan(mustParseURL(t, "https://cache.example.com:8442"))
+	require.NoError(t, err)
+
+	results := make([]server_structs.TestResult, 0, len(plan.Steps))
+	for _, step := range plan.Steps {
+		results = append(results, server_structs.TestResult{
+			Edges:   step.Edges,
+			Op:      string(step.Op),
+			Outcome: server_structs.TestOutcomePass,
+		})
+	}
+	report := server_structs.NewTestReport(plan.Suite, plan.Expected, results)
+
+	for _, edge := range []server_structs.Edge{
+		server_structs.EdgeFront,
+		server_structs.EdgeCacheHit,
+		server_structs.EdgeDirectorResolve,
+		server_structs.EdgeUpstreamFetch,
+		server_structs.EdgeCacheWrite,
+	} {
+		assert.Contains(t, report.Covered, edge,
+			"a run that reads cold then warm must cover %s", edge)
+	}
+
+	// What remains genuinely unprobed is the authenticated miss path, since the
+	// upstream here is the Director's own public-read synthetic origin.
+	assert.ElementsMatch(t,
+		[]server_structs.Edge{server_structs.EdgeAuthz, server_structs.EdgeFedToken},
+		report.Uncovered)
+}
+
+// Both branches of the cache path have to end up covered by one run.
+//
+// The operational failure behind #3503 was object fetches through caches
+// breaking for hits alone, which every probe missed because they all ran cold.
+// A single cold read leaves EdgeCacheHit uncovered; a cold read followed by a
+// warm one covers both.
+func TestCacheTestPlanCoversHitAndMiss(t *testing.T) {
+	server_utils.ResetTestState()
+	t.Cleanup(server_utils.ResetTestState)
+	require.NoError(t, param.Server_Hostname.Set("director-1.example.com"))
+
+	plan, err := cacheTestPlan(mustParseURL(t, "https://cache.example.com:8442"))
+	require.NoError(t, err)
+
+	results := make([]server_structs.TestResult, 0, len(plan.Steps))
+	for _, step := range plan.Steps {
+		results = append(results, server_structs.TestResult{
+			Binding: plan.Binding,
+			Edges:   step.Edges,
+			Op:      string(step.Op),
+			Outcome: server_structs.TestOutcomePass,
+		})
+	}
+	report := server_structs.NewTestReport(plan.Suite, plan.Expected, results)
+
+	for _, edge := range []server_structs.Edge{
+		server_structs.EdgeFront,
+		server_structs.EdgeCacheHit,
+		server_structs.EdgeDirectorResolve,
+		server_structs.EdgeUpstreamFetch,
+		server_structs.EdgeCacheWrite,
+	} {
+		assert.Contains(t, report.Covered, edge,
+			"a run that reads cold then warm must cover %s", edge)
+	}
+
+	// What remains genuinely unprobed is the authenticated miss path, since the
+	// upstream here is the Director's own public-read synthetic origin.
+	assert.ElementsMatch(t,
+		[]server_structs.Edge{server_structs.EdgeAuthz, server_structs.EdgeFedToken},
+		report.Uncovered)
+}
+
+// The Director drives the cache to its own synthetic origin, which is served
+// public-read. Nothing mints a federation token or contacts a real origin, so a
+// cache serving authenticated namespaces has that path unprobed -- and the report
+// has to say so rather than reading as full coverage.
+func TestCacheTestPlanDeclaresItsBlindSpots(t *testing.T) {
+	server_utils.ResetTestState()
+	t.Cleanup(server_utils.ResetTestState)
+	require.NoError(t, param.Server_Hostname.Set("director-1.example.com"))
+
+	plan, err := cacheTestPlan(mustParseURL(t, "https://cache.example.com:8442"))
+	require.NoError(t, err)
+
+	report := server_structs.NewTestReport(plan.Suite, plan.Expected, []server_structs.TestResult{{
+		Edges:   plan.Steps[0].Edges,
+		Op:      string(plan.Steps[0].Op),
+		Outcome: server_structs.TestOutcomePass,
+	}})
+
+	assert.Equal(t, server_structs.TestOutcomePass, report.Outcome)
+	assert.Contains(t, report.Uncovered, server_structs.EdgeFedToken,
+		"the authenticated miss path has no probe anywhere in Pelican")
+	assert.Contains(t, report.Uncovered, server_structs.EdgeAuthz)
+	assert.Contains(t, report.Uncovered, server_structs.EdgeCacheHit,
+		"the cold step on its own says nothing about serving a resident object; "+
+			"it is the warm step that covers this, see TestCacheTestPlanCoversHitAndMiss")
 }
 
 func TestCacheTestPlanRequiresAHostname(t *testing.T) {
@@ -185,7 +311,7 @@ func TestDirectorTestPlanSelection(t *testing.T) {
 		ad := server_structs.ServerAd{Type: server_structs.CacheType.String(), URL: mustParseURL(t, "https://c:8442")}
 		plan, err := directorTestPlan(ad)
 		require.NoError(t, err)
-		assert.Len(t, plan.Steps, 1)
+		assert.Len(t, plan.Steps, 2, "a cache probe reads cold then warm")
 	})
 
 	// The previous implementation initialized its success flag to true and only
