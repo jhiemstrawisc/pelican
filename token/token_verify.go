@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -62,6 +63,13 @@ const (
 	Header TokenSource = "AuthorizationHeader" // "Authorization" header
 	Cookie TokenSource = "Cookie"              // "login" cookie
 	Authz  TokenSource = "AuthzQueryParameter" // "authz" query parameter
+	// AccessToken is the "access_token" query parameter from RFC 6750 §2.3.
+	//
+	// Pelican's own serving layers already accept it -- origin_serve/handlers.go
+	// reads it, and the client and the persistent cache send tokens there -- but
+	// nothing on the Director side looked for it. Callers opt in by listing it,
+	// so adding it here changes no existing endpoint.
+	AccessToken TokenSource = "AccessTokenQueryParameter"
 )
 
 // ClockSkewLeeway is the tolerance applied to JWT temporal claim validation
@@ -80,7 +88,10 @@ const (
 
 var (
 	federationJWK *jwk.Cache
-	authChecker   AuthChecker
+	// federationJWKMutex guards creating the cache and registering URLs in it.
+	// Get is safe to call concurrently; the setup around it was not.
+	federationJWKMutex sync.Mutex
+	authChecker        AuthChecker
 
 	registeredServerJWKSResolver atomic.Pointer[RegisteredServerJWKSResolver]
 )
@@ -111,6 +122,27 @@ func resolveRegisteredServerJWKS(ctx *gin.Context, serverID string) (jwk.Set, bo
 }
 
 // Checks that the given token was signed by the federation jwk and also checks that the token has the expected scope
+// ensureFederationJWKRegistered makes the shared JWKS cache ready to serve a
+// URL, creating the cache and registering the URL if needed.
+func ensureFederationJWKRegistered(ctx context.Context, jwksUrl string) error {
+	federationJWKMutex.Lock()
+	defer federationJWKMutex.Unlock()
+
+	if federationJWK == nil {
+		federationJWK = jwk.NewCache(ctx)
+	}
+	if federationJWK.IsRegistered(jwksUrl) {
+		return nil
+	}
+
+	client := &http.Client{Transport: config.GetTransport()}
+	if err := federationJWK.Register(jwksUrl,
+		jwk.WithRefreshInterval(15*time.Minute), jwk.WithHTTPClient(client)); err != nil {
+		return errors.Wrap(err, "Failed to register cache for federation's public JWKS")
+	}
+	return nil
+}
+
 func (a AuthCheckImpl) checkFederationIssuer(c *gin.Context, strToken string, expectedScopes []token_scopes.TokenScope, allScopes bool) error {
 	dirFallback := false
 
@@ -145,12 +177,16 @@ func (a AuthCheckImpl) checkFederationIssuer(c *gin.Context, strToken string, ex
 
 	fedURIFile := fedInfo.JwksUri
 	ctx := context.Background()
-	if federationJWK == nil {
-		client := &http.Client{Transport: config.GetTransport()}
-		federationJWK = jwk.NewCache(ctx)
-		if err := federationJWK.Register(fedURIFile, jwk.WithRefreshInterval(15*time.Minute), jwk.WithHTTPClient(client)); err != nil {
-			return errors.Wrap(err, "Failed to register cache for federation's public JWKS")
-		}
+	// Register whatever URL we were handed, not merely the first one ever seen.
+	//
+	// The cache was previously populated only when it did not yet exist, so its
+	// one registered URL was whichever the process happened to verify against
+	// first. A federation that later reports a different JWKS URI -- a rotation,
+	// a redeployment, or simply discovery returning a new value -- would then
+	// fail every verification until the process restarted, because Get refuses a
+	// URL that was never registered.
+	if err := ensureFederationJWKRegistered(ctx, fedURIFile); err != nil {
+		return err
 	}
 
 	jwks, err := federationJWK.Get(ctx, fedURIFile)
@@ -413,6 +449,18 @@ func Verify(ctx *gin.Context, authOption AuthOption) (status int, verified bool,
 				token = authzToken[0]
 				tokenFound = true
 				foundSource = Authz
+			}
+		case AccessToken:
+			accessToken := ctx.Request.URL.Query()["access_token"]
+			if len(accessToken) <= 0 {
+				continue
+			} else {
+				// Tolerate a "Bearer " prefix: the parameter is meant to carry
+				// the bare token, but callers that build it from an Authorization
+				// header sometimes leave the scheme on.
+				token = strings.TrimPrefix(accessToken[0], "Bearer ")
+				tokenFound = true
+				foundSource = AccessToken
 			}
 		default:
 			log.Error("Invalid/unsupported token source")

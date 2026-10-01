@@ -123,6 +123,108 @@ func cacheTestPlan(cacheUrl url.URL) (server_utils.ProbePlan, error) {
 	}, nil
 }
 
+// cacheAuthTestPlan builds the Director's probe of a cache's authenticated miss
+// path.
+//
+// Every other object a cache is asked to serve on its behalf is public, so
+// before this nothing established that a cache could serve a namespace requiring
+// a token at all. This probe reads an object from a protected namespace, which
+// makes the cache apply its scitokens configuration on the way in and carry
+// authorization on the way out.
+//
+// Both hops are authenticated, and that is forced rather than chosen. A cache
+// decides whether to demand a token from its own client by consulting the
+// capabilities of the namespace the Director advertised, and there is one answer
+// per namespace. Making the upstream fetch authenticated therefore makes the
+// inbound read authenticated too.
+//
+// WHY EdgeFedToken IS ABSENT from the step below, even though it is sometimes
+// exercised.
+//
+// The two cache implementations behave differently here, which was established
+// by running this probe against both rather than by reading either:
+//
+//   - The XRootD cache forwards its *client's* token upstream. It attaches the
+//     federation token it holds from getFedToken only when the origin demands
+//     one, which is the Origin.DisableDirectClients path in
+//     origin_serve/handlers.go. The Director's synthetic origin is not such an
+//     origin, so the cache's federation token is never involved.
+//   - The v2 persistent cache does present its federation token, in the
+//     access_token query parameter, and this probe genuinely covers the edge
+//     for it.
+//
+// A plan declares one edge set, and it has no reliable way to tell which
+// implementation is answering. Given a choice between over-claiming for one and
+// under-claiming for the other, this under-claims: a reported gap that does not
+// exist costs a little routing weight, while a claimed edge that was never
+// touched is the precise failure this subsystem exists to prevent. The same rule
+// is applied in server_structs.TestResult.reachedEdges, which claims no edges
+// rather than guess.
+//
+// Closing the edge properly needs the synthetic origin to require a federation
+// token alongside the client's, and needs XRootD's client plugin to supply one.
+// See docs/health-testing-design.md.
+//
+// A single cold read is enough here. The hit path is already covered by the
+// public plan's warm read, and repeating it against a protected object would buy
+// nothing but another round trip.
+func cacheAuthTestPlan(cacheUrl url.URL) (server_utils.ProbePlan, error) {
+	directorID := param.Server_Hostname.GetString()
+	if directorID == "" {
+		return server_utils.ProbePlan{}, errors.Errorf(
+			"%s is empty; cannot construct director test file path", param.Server_Hostname.GetName())
+	}
+
+	now := time.Now()
+	objectPath := path.Join(
+		server_utils.AuthTestPrefix(directorID, now),
+		server_structs.DirectorTestSuite.String()+"-"+now.Format(time.RFC3339)+".txt")
+
+	return server_utils.ProbePlan{
+		Suite: server_structs.DirectorTestSuite,
+		Binding: server_structs.BindingRef{
+			Namespace:   server_utils.MonitoringAuthNs,
+			StorageKind: "cache",
+			Synthetic:   true,
+		},
+		BaseURL:    cacheUrl.String(),
+		ObjectPath: objectPath,
+		Body:       server_utils.DirectorTestBody,
+		Auth: server_utils.ProbeAuth{
+			// An empty issuer means the federation's discovery endpoint, which is
+			// what the Director signs as and what the cache is configured to trust
+			// for this namespace. The legacy fallback to the Director's own URL is
+			// harmless here: a cache that rejects the first token has nothing that
+			// would accept the second, so the probe fails either way and reports
+			// the authorization edge, which is the truth.
+			//
+			// Audiences is deliberately empty, which mints the WLCG "any"
+			// audience. WriteCacheScitokensConfig does not populate a [Global]
+			// audience_json the way the origin's does, so the cache's scitokens
+			// plugin rejects a token carrying any specific audience. Naming the
+			// cache here looks more correct and fails every time.
+			//
+			// The cache's scitokens entry for this namespace is based at the
+			// namespace itself, so the scope is made relative to it when minted.
+			IssuerBasePath: server_utils.MonitoringAuthNs,
+			Scopes: []server_utils.ProbeScope{
+				{Authorization: token_scopes.Wlcg_Storage_Read, Path: objectPath},
+			},
+		},
+		Expected: server_structs.ExpectedEdges(server_structs.CacheType),
+		Steps: []server_utils.ProbeStep{{
+			Op: server_utils.ProbeOpRead,
+			Edges: []server_structs.Edge{
+				server_structs.EdgeFront,
+				server_structs.EdgeAuthz,
+				server_structs.EdgeDirectorResolve,
+				server_structs.EdgeUpstreamFetch,
+				server_structs.EdgeCacheWrite,
+			},
+		}},
+	}, nil
+}
+
 // evictCacheTestFile asks the cache to evict a previously-created director test file.
 // Rather than calling the xrdhttp-pelican evict API directly (which would require the
 // cache's scitokens config to trust the federation issuer), this sends the eviction

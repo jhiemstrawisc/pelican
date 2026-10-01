@@ -182,15 +182,31 @@ func originTestPlan(ad server_structs.ServerAd) server_utils.ProbePlan {
 	return plan
 }
 
-// directorTestPlan selects the probe appropriate to the kind of server being tested.
-func directorTestPlan(ad server_structs.ServerAd) (server_utils.ProbePlan, error) {
+// directorTestPlans returns every probe the Director runs against a server.
+//
+// A cache gets two, because the two differ in their authorization context and
+// therefore in their binding: one public read-through, and one that forces the
+// cache to obtain a federation token and present it upstream. They cannot be
+// steps of a single plan -- a plan names one object and one token, and these
+// need two of each.
+func directorTestPlans(ad server_structs.ServerAd) ([]server_utils.ProbePlan, error) {
 	switch ad.Type {
 	case server_structs.OriginType.String():
-		return originTestPlan(ad), nil
+		return []server_utils.ProbePlan{originTestPlan(ad)}, nil
+
 	case server_structs.CacheType.String():
-		return cacheTestPlan(ad.URL)
+		publicPlan, err := cacheTestPlan(ad.URL)
+		if err != nil {
+			return nil, err
+		}
+		authPlan, err := cacheAuthTestPlan(ad.URL)
+		if err != nil {
+			return nil, err
+		}
+		return []server_utils.ProbePlan{publicPlan, authPlan}, nil
+
 	default:
-		return server_utils.ProbePlan{}, errors.Errorf(
+		return nil, errors.Errorf(
 			"cannot health test server %s: unrecognized server type %q", ad.Name, ad.Type)
 	}
 }
@@ -238,10 +254,13 @@ func LaunchPeriodicDirectorTest(ctx context.Context, serverUrlStr string) {
 
 	defer ticker.Stop()
 
-	// prevCacheTestFilePath tracks the namespace-relative path of the test file created in the
-	// previous successful cache test cycle. On the next successful cycle, this file is evicted
+	// prevCacheTestFilePaths tracks the namespace-relative paths of the test objects created in
+	// the previous successful cache test cycle. On the next successful cycle, each is evicted
 	// from the cache via the xrdhttp-pelican evict API so that test files don't accumulate.
-	var prevCacheTestFilePath string
+	//
+	// This is a list because a cache probe runs more than one plan -- the public monitoring
+	// namespace and the protected one -- and each read leaves an object resident.
+	var prevCacheTestFilePaths []string
 
 	// runDirectorTestCycle executes a single director test cycle and reports the result back to the server.
 	// Extracted as a helper to allow running the first test immediately upon registration, avoiding the
@@ -264,12 +283,15 @@ func LaunchPeriodicDirectorTest(ctx context.Context, serverUrlStr string) {
 
 		log.Debug(fmt.Sprintf("Starting a director test cycle for %s server %s at %s", currentServerAd.Type, currentServerAd.Name, currentServerAd.URL.String()))
 
-		// Build the probe for whichever kind of server this is. An unrecognized
+		// Build the probes for whichever kind of server this is. An unrecognized
 		// type yields no plan and is reported as such: the previous code left its
 		// success flag initialized to true in that case and reported "ok" without
 		// having run any test at all.
-		plan, planErr := directorTestPlan(currentServerAd)
+		plans, planErr := directorTestPlans(currentServerAd)
 		var run server_utils.ProbeRun
+		// Objects this cycle left resident on the server, to be evicted on
+		// the next successful cycle.
+		var leftBehind []string
 		if planErr != nil {
 			run.Report = server_structs.NewTestReport(
 				server_structs.DirectorTestSuite,
@@ -281,7 +303,25 @@ func LaunchPeriodicDirectorTest(ctx context.Context, serverUrlStr string) {
 					At:      time.Now().Unix(),
 				}})
 		} else {
-			run = plan.Run(ctx)
+			// Fold every plan into one report, so the coverage ledger spans
+			// everything this Director checked rather than whichever plan
+			// happened to run last.
+			var results []server_structs.TestResult
+			for _, plan := range plans {
+				planRun := plan.Run(ctx)
+				results = append(results, planRun.Report.Results...)
+				// Every plan that left an object behind contributes one to evict
+				// next cycle. A cache probe runs two plans and each read leaves
+				// an object resident, so tracking only the first let the other
+				// tree grow without bound.
+				if planRun.ObjectPath != "" {
+					leftBehind = append(leftBehind, planRun.ObjectPath)
+				}
+			}
+			run.Report = server_structs.NewTestReport(
+				server_structs.DirectorTestSuite,
+				server_structs.ExpectedEdges(serverTypeOf(currentServerAd.Type)),
+				results)
 		}
 
 		reportStatus := "error"
@@ -305,10 +345,12 @@ func LaunchPeriodicDirectorTest(ctx context.Context, serverUrlStr string) {
 			// This ensures test files don't accumulate on the cache, especially when
 			// Server.DropPrivileges is true and the Pelican process cannot directly delete
 			// xrootd-owned files.
-			if currentServerAd.Type == server_structs.CacheType.String() && prevCacheTestFilePath != "" {
-				evictCacheTestFile(ctx, currentServerAd.WebURL.String(), prevCacheTestFilePath)
+			if currentServerAd.Type == server_structs.CacheType.String() {
+				for _, stale := range prevCacheTestFilePaths {
+					evictCacheTestFile(ctx, currentServerAd.WebURL.String(), stale)
+				}
 			}
-			prevCacheTestFilePath = run.ObjectPath
+			prevCacheTestFilePaths = leftBehind
 		} else {
 			log.Warningln("Director file transfer test cycle failed for ", currentServerAd.Type,
 				" server: ", currentServerAd.URL.String())

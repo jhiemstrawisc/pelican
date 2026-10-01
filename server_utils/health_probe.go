@@ -202,6 +202,26 @@ const (
 	MonitoringBaseNs string = "/pelican/monitoring"
 	DirectorTestDir  string = "directorTest"
 	SelfTestDir      string = "selfTest"
+
+	// AuthTestDir holds probe objects that are read with a token rather than
+	// anonymously.
+	//
+	// It is advertised as a namespace in its own right, non-public, rather than
+	// as a directory inside the public monitoring namespace. That is forced by
+	// how a cache decides whether to demand a token from its client: it consults
+	// the capabilities of the namespace the Director advertised, and there is one
+	// answer per namespace. A protected directory inside a public namespace is
+	// not expressible.
+	AuthTestDir string = "authTest"
+
+	// MonitoringAuthNs is the protected monitoring namespace.
+	//
+	// A read of an object here is the only probe in Pelican that makes a cache
+	// obtain a federation token and present it to an upstream that demands one.
+	// Everything else a cache is probed with is public, which is why the
+	// authorization and federation-token edges were the last two a client
+	// depends on that nothing measured.
+	MonitoringAuthNs string = MonitoringBaseNs + "/" + AuthTestDir
 )
 
 const (
@@ -218,6 +238,21 @@ func SelfTestPrefix() string { return path.Join(MonitoringBaseNs, SelfTestDir) }
 // are easy to sweep.
 func DirectorTestPrefix(directorID string, when time.Time) string {
 	return path.Join(MonitoringBaseNs, DirectorTestDir, directorID, when.Format("2006-01-02"))
+}
+
+// AuthTestPrefix is DirectorTestPrefix for the protected namespace.
+func AuthTestPrefix(directorID string, when time.Time) string {
+	return path.Join(MonitoringAuthNs, directorID, when.Format("2006-01-02"))
+}
+
+// IsAuthMonitoringPath reports whether a namespace path falls in the protected
+// monitoring namespace rather than the public one.
+//
+// Both the redirect handler and the object handler branch on this, and they must
+// agree: if the Director advertises a path as protected but then serves it
+// without checking a token, the probe passes while proving nothing.
+func IsAuthMonitoringPath(p string) bool {
+	return p == MonitoringAuthNs || strings.HasPrefix(p, MonitoringAuthNs+"/")
 }
 
 // ProbeBodyFor returns the object contents a suite writes and expects to read back.

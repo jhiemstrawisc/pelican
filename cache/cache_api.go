@@ -66,9 +66,15 @@ func CheckCacheSentinelLocation() error {
 // dateSubdirPattern matches YYYY-MM-DD directory names used by daily-nested director test files
 var dateSubdirPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
-// directorTestFilePattern matches the only path shape the eviction endpoint should ever accept:
+// directorTestFilePattern matches the only path shapes the eviction endpoint
+// should ever accept:
 //
 //	<MonitoringBaseNs>/<DirectorTestDir>/<director-id>/YYYY-MM-DD/director-test-<suffix>
+//	<MonitoringBaseNs>/<AuthTestDir>/<director-id>/YYYY-MM-DD/director-test-<suffix>
+//
+// Both trees exist because the Director probes a cache on the public monitoring
+// namespace and again on the protected one. Accepting only the first left the
+// protected tree ineligible for eviction, so its objects accumulated.
 //
 // The director-id is a non-empty path segment (typically the director's hostname) that
 // keeps multiple directors from colliding under a shared cache. The suffix is left
@@ -84,8 +90,9 @@ var dateSubdirPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 // %s-formatted path in HandleDirectorEvictRequest's log lines.
 var directorTestFilePattern = regexp.MustCompile(
 	`^` + regexp.QuoteMeta(server_utils.MonitoringBaseNs) +
-		`/` + regexp.QuoteMeta(server_utils.DirectorTestDir) +
-		`/[^/[:cntrl:]]+/\d{4}-\d{2}-\d{2}/` + regexp.QuoteMeta(server_structs.DirectorTestSuite.String()) +
+		`/(?:` + regexp.QuoteMeta(server_utils.DirectorTestDir) +
+		`|` + regexp.QuoteMeta(server_utils.AuthTestDir) +
+		`)/[^/[:cntrl:]]+/\d{4}-\d{2}-\d{2}/` + regexp.QuoteMeta(server_structs.DirectorTestSuite.String()) +
 		`-[^/[:cntrl:]]+$`)
 
 // removeTestFile disposes of a single director-test file.
@@ -473,17 +480,30 @@ func evictViaLocalPlugin(ctx context.Context, testFilePath string) error {
 // files directly, so cleanupDirectorTestFiles routes removals through the cache's evict
 // API (see removeTestFile). Privilege-on deployments use os.Remove / os.RemoveAll.
 func LaunchDirectorTestFileCleanup(ctx context.Context, egrp *errgroup.Group) {
-	dirTestPath := filepath.Join(param.Cache_NamespaceLocation.GetString(), server_utils.MonitoringBaseNs, server_utils.DirectorTestDir)
+	// Both probe trees, not just the public one.
+	//
+	// The Director probes a cache twice per cycle, on the public monitoring
+	// namespace and on the protected one, and each read leaves an object behind.
+	// Sweeping only directorTest left the authTest tree to grow without bound --
+	// one object per Director per cycle, which at the default interval is a few
+	// thousand a day on every cache in the federation.
+	nsLoc := param.Cache_NamespaceLocation.GetString()
+	testPaths := []string{
+		filepath.Join(nsLoc, server_utils.MonitoringBaseNs, server_utils.DirectorTestDir),
+		filepath.Join(nsLoc, server_utils.MonitoringAuthNs),
+	}
 
 	egrp.Go(func() error {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 		for {
 			// Run immediately on startup, then once every 24h.
-			if err := cleanupDirectorTestFiles(ctx, dirTestPath); err != nil {
-				log.Warningf("Failure during director test file backup cleanup: %v", err)
-			} else {
-				log.Debugf("Director test file backup cleanup pass completed for %s", dirTestPath)
+			for _, dirTestPath := range testPaths {
+				if err := cleanupDirectorTestFiles(ctx, dirTestPath); err != nil {
+					log.Warningf("Failure during director test file backup cleanup of %s: %v", dirTestPath, err)
+				} else {
+					log.Debugf("Director test file backup cleanup pass completed for %s", dirTestPath)
+				}
 			}
 			select {
 			case <-ctx.Done():

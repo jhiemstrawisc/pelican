@@ -211,47 +211,109 @@ func TestCacheTestPlanCoversHitAndMiss(t *testing.T) {
 		report.Uncovered)
 }
 
-// Both branches of the cache path have to end up covered by one run.
-//
-// The operational failure behind #3503 was object fetches through caches
-// breaking for hits alone, which every probe missed because they all ran cold.
-// A single cold read leaves EdgeCacheHit uncovered; a cold read followed by a
-// warm one covers both.
-func TestCacheTestPlanCoversHitAndMiss(t *testing.T) {
+// The authenticated plan is the only probe that makes a cache obtain a
+// federation token and present it upstream.
+func TestCacheAuthTestPlan(t *testing.T) {
 	server_utils.ResetTestState()
 	t.Cleanup(server_utils.ResetTestState)
 	require.NoError(t, param.Server_Hostname.Set("director-1.example.com"))
 
-	plan, err := cacheTestPlan(mustParseURL(t, "https://cache.example.com:8442"))
+	plan, err := cacheAuthTestPlan(mustParseURL(t, "https://cache.example.com:8442"))
 	require.NoError(t, err)
 
-	results := make([]server_structs.TestResult, 0, len(plan.Steps))
-	for _, step := range plan.Steps {
-		results = append(results, server_structs.TestResult{
-			Binding: plan.Binding,
-			Edges:   step.Edges,
-			Op:      string(step.Op),
-			Outcome: server_structs.TestOutcomePass,
-		})
+	// The binding is the protected namespace, not the public one. Recording the
+	// wrong one would let this probe's coverage be credited to a read that never
+	// involved a token.
+	assert.Equal(t, server_utils.MonitoringAuthNs, plan.Binding.Namespace)
+	assert.Contains(t, plan.ObjectPath, server_utils.MonitoringAuthNs)
+	assert.Contains(t, plan.ObjectPath, "director-1.example.com")
+
+	// A token is presented, and it is federation-issued: an empty Issuer means
+	// the federation discovery endpoint, which is what the cache trusts for this
+	// namespace.
+	require.False(t, plan.Auth.Anonymous)
+	assert.Empty(t, plan.Auth.Issuer)
+
+	// Scope relativity: the cache's scitokens entry for this namespace is based
+	// at the namespace, so the minted scope must not repeat it.
+	require.Equal(t, server_utils.MonitoringAuthNs, plan.Auth.IssuerBasePath)
+	scopes, err := plan.ResolvedScopes()
+	require.NoError(t, err)
+	require.Len(t, scopes, 1)
+	assert.NotContains(t, scopes[0].String(), server_utils.MonitoringAuthNs,
+		"scope %q repeats the issuer's base path", scopes[0].String())
+
+	require.Len(t, plan.Steps, 1, "the hit path is already covered by the public plan")
+	assert.Equal(t, []server_structs.Edge{
+		server_structs.EdgeFront,
+		server_structs.EdgeAuthz,
+		server_structs.EdgeDirectorResolve,
+		server_structs.EdgeUpstreamFetch,
+		server_structs.EdgeCacheWrite,
+	}, plan.Steps[0].Edges)
+
+	// EdgeFedToken is deliberately absent. A cache forwards its client's token
+	// upstream and attaches its own federation token only when the origin
+	// demands one, which the Director's synthetic origin does not. Claiming the
+	// edge here would report coverage of a mechanism this probe never touches.
+	assert.NotContains(t, plan.Steps[0].Edges, server_structs.EdgeFedToken,
+		"this probe does not exercise the cache's federation token; see the comment on cacheAuthTestPlan")
+}
+
+// The coverage ledger for a cache, pinned exactly.
+//
+// Every edge but one is now reached by some plan. The exception is the cache's
+// own federation token, which nothing probes because a cache only presents one
+// to an origin that demands it, and the Director's synthetic origin does not.
+//
+// This test is written to fail in both directions on purpose. If a probe is
+// later narrowed, Uncovered grows and it fails. If someone closes the federation
+// token gap, Uncovered shrinks and it fails too -- which is the right moment to
+// be told, because the docs and the issue tracker both need updating then.
+func TestCacheCoverageLedgerIsPinned(t *testing.T) {
+	server_utils.ResetTestState()
+	t.Cleanup(server_utils.ResetTestState)
+	require.NoError(t, param.Server_Hostname.Set("director-1.example.com"))
+
+	ad := server_structs.ServerAd{
+		Type: server_structs.CacheType.String(),
+		URL:  mustParseURL(t, "https://cache.example.com:8442"),
 	}
-	report := server_structs.NewTestReport(plan.Suite, plan.Expected, results)
+	plans, err := directorTestPlans(ad)
+	require.NoError(t, err)
+
+	var results []server_structs.TestResult
+	for _, plan := range plans {
+		for _, step := range plan.Steps {
+			results = append(results, server_structs.TestResult{
+				Binding: plan.Binding,
+				Edges:   step.Edges,
+				Op:      string(step.Op),
+				Outcome: server_structs.TestOutcomePass,
+			})
+		}
+	}
+
+	report := server_structs.NewTestReport(
+		server_structs.DirectorTestSuite,
+		server_structs.ExpectedEdges(server_structs.CacheType),
+		results)
+
+	assert.Equal(t,
+		[]server_structs.Edge{server_structs.EdgeFedToken},
+		report.Uncovered,
+		"the cache's own federation token is the one edge no probe reaches")
 
 	for _, edge := range []server_structs.Edge{
 		server_structs.EdgeFront,
+		server_structs.EdgeAuthz,
 		server_structs.EdgeCacheHit,
 		server_structs.EdgeDirectorResolve,
 		server_structs.EdgeUpstreamFetch,
 		server_structs.EdgeCacheWrite,
 	} {
-		assert.Contains(t, report.Covered, edge,
-			"a run that reads cold then warm must cover %s", edge)
+		assert.Contains(t, report.Covered, edge, "edge %q should be covered", edge)
 	}
-
-	// What remains genuinely unprobed is the authenticated miss path, since the
-	// upstream here is the Director's own public-read synthetic origin.
-	assert.ElementsMatch(t,
-		[]server_structs.Edge{server_structs.EdgeAuthz, server_structs.EdgeFedToken},
-		report.Uncovered)
 }
 
 // The Director drives the cache to its own synthetic origin, which is served
@@ -302,16 +364,25 @@ func TestDirectorTestPlanSelection(t *testing.T) {
 			URL:  mustParseURL(t, "https://o:8443"),
 			Caps: server_structs.Capabilities{Reads: true, Writes: true},
 		}
-		plan, err := directorTestPlan(ad)
+		plans, err := directorTestPlans(ad)
 		require.NoError(t, err)
-		assert.Len(t, plan.Steps, 3)
+		require.Len(t, plans, 1)
+		assert.Len(t, plans[0].Steps, 3)
 	})
 
 	t.Run("cache", func(t *testing.T) {
 		ad := server_structs.ServerAd{Type: server_structs.CacheType.String(), URL: mustParseURL(t, "https://c:8442")}
-		plan, err := directorTestPlan(ad)
+		plans, err := directorTestPlans(ad)
 		require.NoError(t, err)
-		assert.Len(t, plan.Steps, 2, "a cache probe reads cold then warm")
+		require.Len(t, plans, 2, "a cache gets a public plan and an authenticated one")
+
+		assert.Len(t, plans[0].Steps, 2, "the public plan reads cold then warm")
+		assert.True(t, plans[0].Auth.Anonymous)
+
+		assert.Len(t, plans[1].Steps, 1, "the authenticated plan needs only a cold read")
+		assert.False(t, plans[1].Auth.Anonymous,
+			"the whole point of the second plan is that a token is involved")
+		assert.Equal(t, server_utils.MonitoringAuthNs, plans[1].Binding.Namespace)
 	})
 
 	// The previous implementation initialized its success flag to true and only
@@ -322,7 +393,7 @@ func TestDirectorTestPlanSelection(t *testing.T) {
 		ad := server_structs.ServerAd{Type: "registry", URL: mustParseURL(t, "https://r:8444")}
 		ad.Name = "somewhere-odd"
 
-		_, err := directorTestPlan(ad)
+		_, err := directorTestPlans(ad)
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unrecognized server type")

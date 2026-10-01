@@ -98,6 +98,16 @@ func TestDirectorTestFilePattern(t *testing.T) {
 		// --- Paths that MUST be accepted ---
 		{"valid txt file", validTxt, true},
 		{"valid cinfo file", validCinfo, true},
+
+		// The protected monitoring namespace. The Director probes a cache on both
+		// trees, so refusing this one leaves its objects ineligible for eviction
+		// and they accumulate -- a few thousand a day per Director per cache.
+		{"valid txt file under authTest",
+			server_utils.MonitoringAuthNs + "/director-1.example.com/2026-06-16/" +
+				server_structs.DirectorTestSuite.String() + "-abc123.txt", true},
+		{"valid cinfo file under authTest",
+			server_utils.MonitoringAuthNs + "/director-1.example.com/2026-06-16/" +
+				server_structs.DirectorTestSuite.String() + "-abc123.txt.cinfo", true},
 		{"director-id with dots and dashes", base + "/director-1.example.com/2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x", true},
 		{"director-id with port-like segment", base + "/director-1.example.com:8443/2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x.txt", true},
 		{"suffix with extra dashes and dots", prefix + "/" + server_structs.DirectorTestSuite.String() + "-2026-06-16T00.00.00Z.cinfo", true},
@@ -117,6 +127,18 @@ func TestDirectorTestFilePattern(t *testing.T) {
 		{"empty director-id (double slash)", base + "//2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x", false},
 		{"double slash before filename", prefix + "//" + server_structs.DirectorTestSuite.String() + "-x", false},
 		{"extra nested directory", prefix + "/extra/" + server_structs.DirectorTestSuite.String() + "-x", false},
+
+		// Loosening the regex to admit the protected tree must not admit any
+		// other sibling of the monitoring namespace.
+		{"selfTest tree is not evictable",
+			server_utils.MonitoringBaseNs + "/" + server_utils.SelfTestDir +
+				"/director-1.example.com/2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x.txt", false},
+		{"invented sibling tree is rejected",
+			server_utils.MonitoringBaseNs + "/somethingElse/director-1.example.com/2026-06-16/" +
+				server_structs.DirectorTestSuite.String() + "-x.txt", false},
+		{"authTest without the director-id segment",
+			server_utils.MonitoringAuthNs + "/2026-06-16/" +
+				server_structs.DirectorTestSuite.String() + "-x.txt", false},
 
 		// --- Date-segment validation ---
 		{"date wrong format (no dashes)", base + "/director-1.example.com/20260616/" + server_structs.DirectorTestSuite.String() + "-x", false},

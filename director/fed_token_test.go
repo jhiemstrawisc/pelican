@@ -284,11 +284,23 @@ func TestCreateFedTok(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, tc.discoveryUrl, issuer)
 			if _, exists := tc.allowedPrefixes[tc.host]; !exists {
+				// An unrestricted cache gets the whole namespace, which already
+				// covers the monitoring prefix, so no extra scope is appended.
 				assert.Len(t, scopes, 1)
 				assert.Equal(t, "storage.read:/", scopes[0])
 			} else {
-				assert.Len(t, scopes, len(tc.allowedPrefixes[tc.host]))
+				// A restricted cache additionally gets the protected monitoring
+				// namespace. Restricting which of the federation's data a cache
+				// may serve must not also switch off its health testing; see
+				// TestFedTokenAlwaysReachesTheMonitoringNamespace.
+				monitoringScope := "storage.read:" + server_utils.MonitoringAuthNs
+				assert.Contains(t, scopes, monitoringScope)
+				assert.Len(t, scopes, len(tc.allowedPrefixes[tc.host])+1)
+
 				for _, scope := range scopes {
+					if scope == monitoringScope {
+						continue
+					}
 					scope = strings.Split(scope, ":")[1]
 					assert.Contains(t, tc.allowedPrefixes[tc.host], scope)
 				}

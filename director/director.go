@@ -950,12 +950,14 @@ func redirectToOrigin(ginCtx *gin.Context) {
 				Path:   "/api/v1.0/director/healthTest",
 			},
 		}
-		monitoringNs := server_structs.NamespaceAd{
-			Path: server_utils.MonitoringBaseNs,
-			Caps: server_structs.Capabilities{
-				PublicReads: true,
-				Reads:       true,
-			},
+		monitoringNs, err := monitoringNamespaceAd(ginCtx, reqPath)
+		if err != nil {
+			log.Errorf("Failed to build the monitoring namespace ad for a health-test redirect: %v", err)
+			ginCtx.JSON(http.StatusInternalServerError, server_structs.SimpleApiResp{
+				Status: server_structs.RespFailed,
+				Msg:    "Internal configuration error",
+			})
+			return
 		}
 		redirectSucceeded = true
 		generateRedirectResponse(ginCtx, []server_structs.ServerAd{healthAd}, []server_structs.ServerAd{healthAd}, monitoringNs, requestId)
@@ -1695,13 +1697,10 @@ func listNamespacesV1Deprecated(ctx *gin.Context) {
 
 func listNamespacesV2(ctx *gin.Context) {
 	namespacesAds := listNamespacesFromOrigins()
-	namespacesAds = append(namespacesAds, server_structs.NamespaceAd{
-		Caps: server_structs.Capabilities{
-			PublicReads: true,
-			Reads:       true,
-		},
-		Path: server_utils.MonitoringBaseNs,
-	})
+	// Both synthetic monitoring namespaces. A cache reads this listing at startup
+	// to build its scitokens configuration, so the protected one has to appear
+	// here or the cache has no configured trust for the probe's token.
+	namespacesAds = append(namespacesAds, monitoringNamespaceAds(ctx)...)
 	ctx.JSON(http.StatusOK, namespacesAds)
 }
 
@@ -1817,6 +1816,21 @@ func getHealthTestFile(ctx *gin.Context) {
 			Msg:    err.Error(),
 		})
 		return
+	}
+
+	// Objects in the protected namespace require a federation token. This is the
+	// other half of advertising that namespace as non-public: if the Director
+	// says a token is needed and then serves the object without one, the probe
+	// passes without a token ever having been exercised.
+	if server_utils.IsAuthMonitoringPath(cleanedPath) {
+		if status, authErr := authorizeMonitoringRead(ctx, cleanedPath); authErr != nil {
+			log.Debugf("Refusing protected health test object %s: %v", cleanedPath, authErr)
+			ctx.JSON(status, server_structs.SimpleApiResp{
+				Status: server_structs.RespFailed,
+				Msg:    authErr.Error(),
+			})
+			return
+		}
 	}
 
 	fileContent := server_utils.DirectorTestBody + "\n"

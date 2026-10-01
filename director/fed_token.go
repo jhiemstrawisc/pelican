@@ -21,6 +21,7 @@ package director
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -30,6 +31,7 @@ import (
 	"github.com/pelicanplatform/pelican/config"
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/server_structs"
+	"github.com/pelicanplatform/pelican/server_utils"
 	"github.com/pelicanplatform/pelican/token"
 	"github.com/pelicanplatform/pelican/token_scopes"
 )
@@ -120,7 +122,7 @@ func createFedTok(ginCtx *gin.Context, rInfo requestInfo) (tok string, err error
 		hostPrefixes = map[string]struct{}{"/": {}}
 	}
 
-	scopes := make([]token_scopes.TokenScope, 0, len(allowedPrefixes[rInfo.Host]))
+	scopes := make([]token_scopes.TokenScope, 0, len(allowedPrefixes[rInfo.Host])+1)
 	for prefix := range hostPrefixes {
 		// Provide at least _some_ basic validation before we use this value to mint read tokens...
 		if !strings.HasPrefix(prefix, "/") {
@@ -136,6 +138,46 @@ func createFedTok(ginCtx *gin.Context, rInfo requestInfo) (tok string, err error
 		}
 		scopes = append(scopes, readScope)
 	}
+
+	// The protected monitoring namespace is always readable, whatever the
+	// registry says about this host's prefixes.
+	//
+	// Those prefixes express which of the federation's *data* a cache may serve.
+	// The monitoring namespace is not data: it holds nothing but probe objects
+	// the Director itself generates, and reading one is how the Director
+	// establishes that this cache can serve a namespace requiring authorization.
+	// Leaving it to AllowedPrefixes would mean that restricting a cache to a
+	// subset of the federation silently disables part of its health testing, and
+	// the probe would fail for a reason that has nothing to do with the cache.
+	//
+	// Two cases are deliberately left alone.
+	//
+	// An existing prefix that already covers it, which is the common case: an
+	// unrestricted cache holds "storage.read:/", and appending a narrower scope
+	// beneath it would be noise on every token.
+	//
+	// And a cache with no readable prefix at all. An administrator who granted
+	// a cache nothing meant nothing, and a cache that may serve no data is not
+	// worth health testing anyway. Health testing follows the ability to serve;
+	// it does not create it.
+	wantMonitoring := token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, server_utils.MonitoringAuthNs)
+	held := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		held = append(held, sc.String())
+	}
+	alreadyCovered := slices.ContainsFunc(token_scopes.ParseResourceScopes(held),
+		func(rs token_scopes.ResourceScope) bool { return rs.Contains(wantMonitoring) })
+
+	if len(scopes) > 0 && !alreadyCovered {
+		var monitoringScope token_scopes.TokenScope
+		monitoringScope, err = token_scopes.Wlcg_Storage_Read.Path(server_utils.MonitoringAuthNs)
+		if err != nil {
+			err = errors.Wrap(err, "monitoring token scope could not be created")
+			return
+		}
+		scopes = append(scopes, monitoringScope)
+	}
+
 	fToken.AddScopes(scopes...)
 
 	tok, err = fToken.CreateToken()
