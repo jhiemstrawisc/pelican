@@ -111,15 +111,18 @@ type (
 		EnableTLSClientAuth bool
 		SelfTest            bool
 		MonitoringPrefix    string
-		Concurrency         int
-		Port                int
-		FederationPrefix    string
-		HttpServiceUrl      string
-		HttpAuthTokenFile   string
-		XRootServiceUrl     string
-		RunLocation         string
-		StorageType         string
-		UploadTempLocation  string
+		// ProbePrefixes are the per-export reserved paths health probes write
+		// into, so POSC can be bypassed for them.
+		ProbePrefixes      []string
+		Concurrency        int
+		Port               int
+		FederationPrefix   string
+		HttpServiceUrl     string
+		HttpAuthTokenFile  string
+		XRootServiceUrl    string
+		RunLocation        string
+		StorageType        string
+		UploadTempLocation string
 
 		// S3 specific options that are kept top-level because
 		// they aren't specific to each export
@@ -1313,6 +1316,16 @@ func ConfigXrootd(ctx context.Context, isOrigin bool) (string, error) {
 		xrdConfig.Origin.AllowNonPublicTPC = param.Server_SSRFProtection_Disabled.GetBool() ||
 			param.Server_SSRFProtection_SkipDefaultBlocks.GetBool()
 		xrdConfig.Origin.MonitoringPrefix = server_utils.MonitoringBaseNs
+		// Health probe objects are written and deleted within a single cycle, so
+		// two-phase commit through the in-progress staging area buys nothing and
+		// costs a rename into a path the probe token does not authorize. This is
+		// the same call already made for the monitoring prefix just above.
+		if exports, exportErr := server_utils.GetOriginExports(); exportErr == nil {
+			for _, export := range exports {
+				xrdConfig.Origin.ProbePrefixes = append(xrdConfig.Origin.ProbePrefixes,
+					path.Join(export.FederationPrefix, server_utils.ProbeReservedPrefix))
+			}
+		}
 
 		switch xrdConfig.Origin.StorageType {
 		case "https":

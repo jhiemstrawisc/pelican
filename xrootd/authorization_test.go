@@ -1177,6 +1177,53 @@ func TestGenerateMonitoringIssuer(t *testing.T) {
 	}
 }
 
+// The monitoring issuer may only reach into real exports when probes actually
+// go there.
+//
+// This file configures XRootD, and real-export probing defaults to off for every
+// XRootD-fronted backend. Adding each export's federation prefix unconditionally
+// would widen what the origin's own signing key is authorized for, across every
+// namespace it serves, to permit probes that never run.
+func TestMonitoringIssuerWidensOnlyWhenRealExportsAreProbed(t *testing.T) {
+	t.Cleanup(test_utils.SetupTestLogging(t))
+
+	setup := func(t *testing.T, probeRealExports string) Issuer {
+		t.Helper()
+		server_utils.ResetTestState()
+		t.Cleanup(server_utils.ResetTestState)
+
+		require.NoError(t, param.Origin_SelfTest.Set(true))
+		require.NoError(t, param.Server_ExternalWebUrl.Set("https://my-origin.com:8443"))
+		require.NoError(t, param.Origin_StorageType.Set("posix"))
+		require.NoError(t, param.Origin_ProbeRealExports.Set(probeRealExports))
+		require.NoError(t, param.Origin_FederationPrefix.Set("/ligo/frames"))
+		require.NoError(t, param.Origin_StoragePrefix.Set(t.TempDir()))
+		require.NoError(t, param.Origin_EnableReads.Set(true))
+
+		issuer, err := GenerateMonitoringIssuer()
+		require.NoError(t, err)
+		return issuer
+	}
+
+	t.Run("off by default on an XRootD-fronted backend", func(t *testing.T) {
+		issuer := setup(t, "auto")
+		assert.Equal(t, []string{server_utils.MonitoringBaseNs}, issuer.BasePaths,
+			"the issuer must not be authorized inside exports it will never probe")
+	})
+
+	t.Run("widens when an administrator opts in", func(t *testing.T) {
+		issuer := setup(t, "true")
+		assert.Contains(t, issuer.BasePaths, server_utils.MonitoringBaseNs)
+		assert.Contains(t, issuer.BasePaths, "/ligo/frames",
+			"probes into the export cannot be authorized without this base path")
+	})
+
+	t.Run("stays narrow when explicitly disabled", func(t *testing.T) {
+		issuer := setup(t, "false")
+		assert.Equal(t, []string{server_utils.MonitoringBaseNs}, issuer.BasePaths)
+	})
+}
+
 func TestGenerateOriginIssuer(t *testing.T) {
 	t.Cleanup(test_utils.SetupTestLogging(t))
 	server_utils.ResetTestState()

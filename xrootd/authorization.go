@@ -980,8 +980,47 @@ func GenerateMonitoringIssuer() (issuer Issuer, err error) {
 	}
 
 	issuer.Issuer = builtinIssuer
-	issuer.BasePaths = []string{server_utils.MonitoringBaseNs}
 	issuer.DefaultUser = "xrootd"
+
+	// The built-in monitoring issuer is the identity the origin uses to probe
+	// itself, so it must be authorized on exactly the places probes touch and
+	// nowhere else.
+	//
+	// The synthetic namespace is one of them. The others are the reserved
+	// sub-prefix inside each export, because health probes now write into the
+	// export's real storage rather than into /pelican/monitoring -- which on a
+	// POSIX origin lives under Origin.RunLocation and so proves nothing about the
+	// volume clients read from. Without these base paths the probe writes are
+	// refused with a 403, which is a correct refusal: the issuer had no authority
+	// there.
+	//
+	// The base path is the export prefix rather than the probe sub-prefix,
+	// because WLCG scope paths are resolved relative to a base path: the issuer
+	// declares where it *may* authorize, and the individual token's scope narrows
+	// that to what it *does*. Probe tokens are scoped to /.pelican-monitoring, so
+	// a leaked one cannot touch anyone's data even though the issuer could in
+	// principle have signed something broader -- and it is the origin's own key,
+	// which already has full access to its own storage.
+	//
+	// The export prefixes are added only when real-export probing is actually on.
+	// This file configures XRootD, and RealExportProbesEnabled is off by default
+	// for every XRootD-fronted backend, so without this gate the common case
+	// widens the issuer's authority across every export to authorize probes that
+	// never run. Authority granted for a feature that is switched off is
+	// authority granted for nothing.
+	basePaths := []string{server_utils.MonitoringBaseNs}
+	storageType := server_structs.OriginStorageType(param.Origin_StorageType.GetString())
+	if server_utils.RealExportProbesEnabled(storageType) {
+		if exports, exportErr := server_utils.GetOriginExports(); exportErr == nil {
+			for _, export := range exports {
+				basePaths = append(basePaths, export.FederationPrefix)
+			}
+		} else {
+			log.Warningf("Could not enumerate origin exports for the monitoring issuer; "+
+				"health probes against real exports will be unauthorized: %v", exportErr)
+		}
+	}
+	issuer.BasePaths = basePaths
 
 	return
 }

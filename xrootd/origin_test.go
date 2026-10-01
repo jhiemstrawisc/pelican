@@ -89,6 +89,12 @@ func ensureXrdS3PluginAvailable(t *testing.T) {
 func originMockup(ctx context.Context, egrp *errgroup.Group, t *testing.T) context.CancelFunc {
 	originServer := &origin.OriginServer{}
 
+	// The self-test is what causes GenerateMonitoringIssuer to emit the origin's
+	// own probe identity into scitokens.cfg. Without it the origin has no
+	// authorization to read or write anything for health purposes, and every
+	// probe is refused -- correctly, but confusingly.
+	require.NoError(t, param.Origin_SelfTest.Set(true))
+
 	// Create our own temp directory (for some reason t.TempDir() does not play well with xrootd)
 	tmpPathPattern := "XRD-Tst_Orgn*"
 	tmpPath, err := os.MkdirTemp("", tmpPathPattern)
@@ -213,13 +219,33 @@ func TestOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unsuccessful test: Server encountered an error: %v", err)
 	}
-	fileTests := server_utils.TestFileTransferImpl{}
 	issuerUrl, err := config.GetServerIssuerURL()
 	require.NoError(t, err)
 
-	ok, err := fileTests.RunTests(ctx, param.Origin_Url.GetString(), param.Origin_TokenAudience.GetString(), issuerUrl, server_utils.ServerSelfTest)
+	plans, err := originSelfTestPlans(issuerUrl)
 	require.NoError(t, err)
-	require.True(t, ok)
+	require.NotEmpty(t, plans)
+
+	var results []server_structs.TestResult
+	for _, plan := range plans {
+		results = append(results, plan.Run(ctx).Report.Results...)
+	}
+	report := server_structs.NewTestReport(server_structs.SelfTestSuite,
+		server_structs.ExpectedEdges(server_structs.OriginType), results)
+
+	require.Equal(t, server_structs.TestOutcomePass, report.Outcome, "results: %+v", report.Results)
+
+	// Real-export probing is opt-in and off here, so this run covers only the
+	// synthetic monitoring namespace -- which establishes that the serving layer
+	// is up and the issuer is trusted, and nothing about the storage a client
+	// reads. That gap must be reported rather than passed off as health.
+	require.ElementsMatch(t,
+		[]server_structs.Edge{server_structs.EdgeFront, server_structs.EdgeAuthz},
+		report.Covered)
+	require.ElementsMatch(t,
+		[]server_structs.Edge{server_structs.EdgeOriginData},
+		report.Uncovered,
+		"a probe of the synthetic namespace must not claim the real data plane")
 }
 
 func TestMultiExportOrigin(t *testing.T) {
@@ -283,13 +309,33 @@ func TestMultiExportOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unsuccessful test: Server encountered an error: %v", err)
 	}
-	fileTests := server_utils.TestFileTransferImpl{}
 	issuerUrl, err := config.GetServerIssuerURL()
 	require.NoError(t, err)
 
-	ok, err := fileTests.RunTests(ctx, param.Origin_Url.GetString(), param.Origin_TokenAudience.GetString(), issuerUrl, server_utils.ServerSelfTest)
+	plans, err := originSelfTestPlans(issuerUrl)
 	require.NoError(t, err)
-	require.True(t, ok)
+	require.NotEmpty(t, plans)
+
+	var results []server_structs.TestResult
+	for _, plan := range plans {
+		results = append(results, plan.Run(ctx).Report.Results...)
+	}
+	report := server_structs.NewTestReport(server_structs.SelfTestSuite,
+		server_structs.ExpectedEdges(server_structs.OriginType), results)
+
+	require.Equal(t, server_structs.TestOutcomePass, report.Outcome, "results: %+v", report.Results)
+
+	// Real-export probing is opt-in and off here, so this run covers only the
+	// synthetic monitoring namespace -- which establishes that the serving layer
+	// is up and the issuer is trusted, and nothing about the storage a client
+	// reads. That gap must be reported rather than passed off as health.
+	require.ElementsMatch(t,
+		[]server_structs.Edge{server_structs.EdgeFront, server_structs.EdgeAuthz},
+		report.Covered)
+	require.ElementsMatch(t,
+		[]server_structs.Edge{server_structs.EdgeOriginData},
+		report.Uncovered,
+		"a probe of the synthetic namespace must not claim the real data plane")
 }
 
 func mockupS3Origin(ctx context.Context, egrp *errgroup.Group, t *testing.T, federationPrefix, bucketName, urlStyle string) context.CancelFunc {

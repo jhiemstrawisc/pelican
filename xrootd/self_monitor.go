@@ -22,12 +22,12 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -38,16 +38,18 @@ import (
 	"github.com/pelicanplatform/pelican/config"
 	"github.com/pelicanplatform/pelican/metrics"
 	"github.com/pelicanplatform/pelican/param"
+	"github.com/pelicanplatform/pelican/server_structs"
 	"github.com/pelicanplatform/pelican/server_utils"
-	"github.com/pelicanplatform/pelican/token"
 	"github.com/pelicanplatform/pelican/token_scopes"
 )
 
 const (
-	selfTestBody   string = "This object was created by the Pelican self-test functionality"
-	selfTestDir    string = server_utils.MonitoringBaseNs + "/selfTest"
+	selfTestBody   string = server_utils.SelfTestBody
 	selfTestPrefix string = "self-test-"
 )
+
+// selfTestDir is the namespace-relative directory both self-tests probe.
+var selfTestDir = server_utils.SelfTestPrefix()
 
 // Add self-test directories to xrootd data location of the cache
 func InitSelfTestDir() error {
@@ -280,62 +282,11 @@ func generateTestFileViaPlugin() (string, error) {
 	return baseUrl.String(), nil
 }
 
-func generateFileTestScitoken() (string, error) {
-	issuerUrl := param.Server_ExternalWebUrl.GetString()
-	if issuerUrl == "" { // if both are empty, then error
-		return "", errors.New("failed to create token: invalid iss, Server_ExternalWebUrl is empty")
-	}
-	fTestTokenCfg := token.NewWLCGToken()
-	fTestTokenCfg.Lifetime = time.Minute
-	fTestTokenCfg.Issuer = issuerUrl
-	fTestTokenCfg.Subject = "cache"
-	fTestTokenCfg.AddResourceScopes(token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, selfTestDir))
-	// For self-tests, the audience is the server itself
-	fTestTokenCfg.AddAudienceAny()
-
-	// CreateToken also handles validation for us
-	tok, err := fTestTokenCfg.CreateToken()
-	if err != nil {
-		return "", errors.Wrap(err, "failed to create file test token")
-	}
-
-	return tok, nil
-}
-
-func downloadTestFile(ctx context.Context, fileUrl string) error {
-	tkn, err := generateFileTestScitoken()
-	if err != nil {
-		return errors.Wrap(err, "failed to create a token for cache self-test download")
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileUrl, nil)
-	if err != nil {
-		return errors.Wrap(err, "failed to create GET request for cache self-test download")
-	}
-
-	req.Header.Set("Authorization", "Bearer "+tkn)
-
-	client := http.Client{Transport: config.GetTransport()}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return errors.Wrap(err, "failed to start request for cache self-test download")
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode > 299 {
-		return errors.Errorf("error response %v from cache self-test download: %v", resp.StatusCode, resp.Status)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return errors.Wrap(err, "failed to get response body from cache self-test download")
-	}
-	if string(body) != selfTestBody {
-		return errors.Errorf("contents of cache self-test file do not match the one uploaded. Expected: %s \nGot: %s", selfTestBody, string(body))
-	}
-
-	return nil
-}
+// Token minting and the download itself now come from the shared probe engine
+// in server_utils. This file previously carried its own generateFileTestScitoken
+// and downloadTestFile, identically named to -- but different in signature and
+// behavior from -- the ones in server_utils/test_file_transfer.go. See
+// https://github.com/PelicanPlatform/pelican/issues/3107.
 
 func deleteTestFile(fileUrlStr string) error {
 	// If drop privileges is enabled, the test file at selfTestDir will be overwritten by the next self-test,
@@ -370,65 +321,298 @@ func deleteTestFile(fileUrlStr string) error {
 	return nil
 }
 
-func runSelfTest(ctx context.Context) (bool, error) {
-	var fileUrl string
-	var err error
+// cacheSeeder places the cache's probe object and its cinfo directly on disk.
+//
+// A cache has no upload path, so its self-test cannot write the object it intends
+// to read; it fabricates the cinfo that XRootD's pfc layer would normally have
+// produced. That is worth stating plainly, because it bounds what a passing cache
+// self-test proves: that XRootD can serve a file someone placed on disk. It says
+// nothing about resolving an object through the Director, obtaining a federation
+// token, or fetching from an upstream origin -- which is why the report it
+// produces lists those edges as uncovered.
+type cacheSeeder struct{}
+
+func (cacheSeeder) Seed(ctx context.Context) (string, error) {
 	if param.Server_DropPrivileges.GetBool() {
-		fileUrl, err = generateTestFileViaPlugin()
-	} else {
-		fileUrl, err = generateTestFile()
+		return generateTestFileViaPlugin()
 	}
+	return generateTestFile()
+}
+
+func (cacheSeeder) Cleanup(ctx context.Context, objectURL string) error {
+	return deleteTestFile(objectURL)
+}
+
+// cacheSelfTestPlan probes the one path a cache self-test can reach: a read of an
+// object already resident on local disk.
+func cacheSelfTestPlan() server_utils.ProbePlan {
+	return server_utils.ProbePlan{
+		Suite: server_structs.SelfTestSuite,
+		Binding: server_structs.BindingRef{
+			Namespace:   selfTestDir,
+			StorageKind: "cache",
+			Issuer:      param.Server_ExternalWebUrl.GetString(),
+			Synthetic:   true,
+		},
+		Body: selfTestBody,
+		Auth: server_utils.ProbeAuth{
+			Issuer:  param.Server_ExternalWebUrl.GetString(),
+			Subject: "cache",
+			// The cache's monitoring issuer is registered under the monitoring
+			// namespace (see buildCacheNsAdsWithIssuer), so the scope below is
+			// made relative to it when the token is minted.
+			//
+			// This used to pass the absolute path straight to NewResourceScope,
+			// which produced a token authorizing
+			// /pelican/monitoring/pelican/monitoring/selfTest -- the prefix
+			// applied twice. It went unnoticed for as long as the cache authfile
+			// still permitted public reads of the monitoring namespace, and
+			// became a hard failure when that changed. See
+			// https://github.com/PelicanPlatform/pelican/issues/3136.
+			IssuerBasePath: server_utils.MonitoringBaseNs,
+			Scopes: []server_utils.ProbeScope{
+				{Authorization: token_scopes.Wlcg_Storage_Read, Path: selfTestDir},
+			},
+		},
+		Seed:     cacheSeeder{},
+		Expected: server_structs.ExpectedEdges(server_structs.CacheType),
+		Steps: []server_utils.ProbeStep{{
+			Op:    server_utils.ProbeOpRead,
+			Edges: []server_structs.Edge{server_structs.EdgeFront, server_structs.EdgeAuthz, server_structs.EdgeCacheHit},
+		}},
+	}
+}
+
+// originSelfTestPlans returns every probe the origin runs, one per export.
+//
+// Probes now go *into the exports themselves* rather than into the synthetic
+// /pelican/monitoring namespace. That prefix resolves under Origin.RunLocation
+// while real exports are symlinks to the administrator's volume, so a probe
+// there established that XRootD was up and nothing whatever about the storage
+// clients read: unmount the data volume and every probe still passed while every
+// client request failed.
+//
+// A writable export gets a write-read-delete cycle in a reserved sub-prefix
+// inside it, which traverses the real serving layer, the real authorization
+// decision for that namespace, and the real backing store. A read-only export
+// gets a read of whatever object the administrator named in HealthProbeObject,
+// since the origin cannot write one of its own to read back.
+func originSelfTestPlans(issuerUrl string) ([]server_utils.ProbePlan, error) {
+	exports, err := server_utils.GetOriginExports()
 	if err != nil {
-		return false, errors.Wrap(err, "self-test failed when generating the file")
+		return nil, errors.Wrap(err, "failed to read origin exports for health probes")
 	}
 
-	err = downloadTestFile(ctx, fileUrl)
-	if err != nil {
-		log.Warningf("Self-test download failed for file %s; err: %v", fileUrl, err)
-		errDel := deleteTestFile(fileUrl)
-		if errDel != nil {
-			return false, errors.Wrap(errDel, "self-test failed during automatic cleanup")
+	storageType := server_structs.OriginStorageType(param.Origin_StorageType.GetString())
+	originUrl := param.Origin_Url.GetString()
+
+	// A natively-served origin mounts its exports under a route prefix when a
+	// director shares the process, so probes have to address it the same way the
+	// advertised data URL does. Probing the bare origin URL would 404 on every
+	// request and report a healthy origin as broken.
+	probeBaseUrl := originUrl
+	if !storageType.Profile().ServedByXRootD && config.IsServerEnabled(server_structs.DirectorType) {
+		if parsed, err := url.Parse(originUrl); err == nil {
+			parsed.Path = server_structs.OriginDataRoutePrefix
+			probeBaseUrl = parsed.String()
 		}
-		return false, errors.Wrapf(err, "self-test failed during download. Automatic cleanup of file at '%s' has completed", fileUrl)
 	}
 
-	err = deleteTestFile(fileUrl)
-	if err != nil {
-		return false, errors.Wrap(err, "self-test failed during automatic cleanup")
+	cfg := server_utils.OriginProbeConfig{
+		StoreCaps:   server_utils.OriginStoreCapabilities(),
+		StorageType: storageType,
+		BaseURL:     probeBaseUrl,
+		IssuerUrl:   issuerUrl,
+		Audiences:   []string{originUrl, param.Origin_TokenAudience.GetString()},
 	}
-	return true, nil
+
+	// The synthetic /pelican/monitoring namespace exists only on XRootD-fronted
+	// origins, where the config template mounts it with an explicit
+	// `xrootd.export`. A natively-served origin registers handlers for exactly its
+	// configured exports (origin_serve.RegisterHandlers keys them by federation
+	// prefix), so probing that namespace there is a guaranteed 404 -- reporting a
+	// healthy origin as critical for failing to serve a path it was never asked
+	// to serve.
+	//
+	// The two halves are complementary rather than redundant: fronted origins get
+	// the monitoring probe, native ones get probes against their real exports.
+	// Each backend has exactly one probe path that works.
+	var plans []server_utils.ProbePlan
+	if cfg.StorageType.Profile().ServedByXRootD {
+		plans = append(plans, server_utils.MonitoringProbePlan(
+			server_structs.SelfTestSuite, probeBaseUrl, issuerUrl, cfg.Audiences,
+			string(cfg.StorageType),
+			server_utils.OriginProbeSteps(cfg.StoreCaps)))
+	}
+
+	// Probing the real exports is what actually covers the storage edge. Whether
+	// it runs is decided per-backend by RealExportProbesEnabled: on for the
+	// natively-served backends, whose authorization Pelican performs itself, and
+	// off for XRootD-fronted ones until their scitokens/authfile path is
+	// understood.
+	if server_utils.RealExportProbesEnabled(cfg.StorageType) {
+		plans = append(plans, server_utils.PlanOriginProbes(exports, cfg)...)
+		for prefix, why := range server_utils.UnprobedExports(exports, cfg.StoreCaps) {
+			log.Debugf("Export %s is not covered by any health probe: %s", prefix, why)
+		}
+	}
+
+	return plans, nil
+}
+
+// recordSelfTest folds a probe report into the component-health registry.
+//
+// Both self-tests report through here, so the message an operator sees names the
+// step that broke and why, rather than restating that the self-test failed.
+func recordSelfTest(report server_structs.TestReport) {
+	// Publish the structured report for the advertisement builder as well as the
+	// message for the local registry. The Director needs the former to tell a
+	// broken data volume from a broken token; a one-word status cannot.
+	server_utils.RecordSelfTestReport(report)
+
+	status, msg := server_utils.SummarizeReport(report)
+	if status == metrics.StatusOK {
+		log.Debugln(msg)
+	} else {
+		log.Warningln(msg)
+	}
+	metrics.SetComponentHealthStatus(metrics.OriginCache_XRootD, status, msg)
 }
 
 // Run a cache self-test and log/record metrics with the test result
 func doSelfMonitorCache(ctx context.Context) {
 	log.Debug("Starting a new self-test monitoring cycle")
+	recordSelfTest(cacheSelfTestPlan().Run(ctx).Report)
+}
 
-	ok, err := runSelfTest(ctx)
-	if ok && err == nil {
-		log.Debugln("Self-test monitoring cycle succeeded at", time.Now().Format(time.UnixDate))
-		metrics.SetComponentHealthStatus(metrics.OriginCache_XRootD, metrics.StatusOK, "Self-test monitoring cycle succeeded at "+time.Now().Format(time.RFC3339))
-	} else if !ok && err == nil {
-		log.Warningln("Self-test monitoring cycle failed with unknown error")
-		metrics.SetComponentHealthStatus(metrics.OriginCache_XRootD, metrics.StatusCritical, "Self-test monitoring cycle failed with unknown err")
-	} else {
-		log.Warningln("Self-test monitoring cycle failed: ", err)
-		metrics.SetComponentHealthStatus(metrics.OriginCache_XRootD, metrics.StatusCritical, "Self-test monitoring cycle failed: "+err.Error())
+// probeSchedule remembers when each plan last ran, so plans carrying a
+// MinInterval are not re-run every cycle.
+//
+// Expensive probes are throttled rather than skipped entirely, which is the
+// whole difference between "S3 origins are unobservable" and "S3 origins are
+// observed less often".
+type probeSchedule struct {
+	mu       sync.Mutex
+	lastRun  map[string]time.Time
+	lastSeen map[string]server_structs.TestResult
+}
+
+func newProbeSchedule() *probeSchedule {
+	return &probeSchedule{
+		lastRun:  map[string]time.Time{},
+		lastSeen: map[string]server_structs.TestResult{},
 	}
 }
+
+// due reports whether a plan should run this cycle.
+func (s *probeSchedule) due(plan server_utils.ProbePlan, now time.Time) bool {
+	if plan.MinInterval <= 0 {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last, ok := s.lastRun[plan.Key()]
+	return !ok || now.Sub(last) >= plan.MinInterval
+}
+
+// record stores a run's results so a throttled plan keeps contributing its most
+// recent verdict to the aggregate report.
+//
+// Without this, a five-minute write probe would leave its export looking
+// uncovered for the nineteen cycles in between -- reporting a blind spot that
+// does not exist.
+func (s *probeSchedule) record(plan server_utils.ProbePlan, now time.Time, results []server_structs.TestResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastRun[plan.Key()] = now
+	for _, res := range results {
+		s.lastSeen[plan.Key()+"|"+res.Op] = res
+	}
+}
+
+// carried returns the most recent results for a plan that did not run this cycle.
+func (s *probeSchedule) carried(plan server_utils.ProbePlan) []server_structs.TestResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []server_structs.TestResult
+	for _, step := range plan.Steps {
+		if res, ok := s.lastSeen[plan.Key()+"|"+string(step.Op)]; ok {
+			out = append(out, res)
+		}
+	}
+	return out
+}
+
+// retain drops bookkeeping for plans that no longer exist.
+//
+// The schedule is package-level and outlives any single cycle, while the set of
+// exports can change under a config reload. Without pruning, a removed export
+// keeps its throttle state and keeps contributing its last verdict to every
+// subsequent report -- health for a namespace the origin no longer serves.
+func (s *probeSchedule) retain(plans []server_utils.ProbePlan) {
+	live := make(map[string]bool, len(plans))
+	for _, plan := range plans {
+		live[plan.Key()] = true
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.lastRun {
+		if !live[key] {
+			delete(s.lastRun, key)
+		}
+	}
+	for key := range s.lastSeen {
+		// lastSeen keys are "<plan key>|<op>", so match on the plan-key prefix.
+		planKey := key
+		if idx := strings.LastIndex(key, "|"); idx >= 0 {
+			planKey = key[:idx]
+		}
+		if !live[planKey] {
+			delete(s.lastSeen, key)
+		}
+	}
+}
+
+var originProbeSchedule = newProbeSchedule()
 
 // Run an origin self-test and log/record metrics with the test result
 func doSelfMonitorOrigin(ctx context.Context) {
 	log.Debug("Starting a new self-test monitoring cycle")
-	fileTests := server_utils.TestFileTransferImpl{}
-	issuerUrl := param.Server_ExternalWebUrl.GetString()
-	ok, err := fileTests.RunTests(ctx, param.Origin_Url.GetString(), param.Origin_TokenAudience.GetString(), issuerUrl, server_utils.ServerSelfTest)
-	if ok && err == nil {
-		log.Debugln("Self-test monitoring cycle succeeded at", time.Now().Format(time.UnixDate))
-		metrics.SetComponentHealthStatus(metrics.OriginCache_XRootD, metrics.StatusOK, "Self-test monitoring cycle succeeded at "+time.Now().Format(time.RFC3339))
-	} else {
-		log.Warningln("Self-test monitoring cycle failed: ", err)
-		metrics.SetComponentHealthStatus(metrics.OriginCache_XRootD, metrics.StatusCritical, "Self-test monitoring cycle failed: "+err.Error())
+
+	plans, err := originSelfTestPlans(param.Server_ExternalWebUrl.GetString())
+	if err != nil {
+		// Without exports there is nothing to probe, and reporting a pass would be
+		// worse than reporting nothing.
+		log.Warningf("Origin self-test could not build probe plans: %v", err)
+		metrics.SetComponentHealthStatus(metrics.OriginCache_XRootD, metrics.StatusCritical,
+			"self-test could not determine what to probe: "+err.Error())
+		return
 	}
+
+	// Forget exports that have gone away since the last cycle before consulting
+	// any carried results.
+	originProbeSchedule.retain(plans)
+
+	now := time.Now()
+	results := make([]server_structs.TestResult, 0, len(plans)*3)
+	for _, plan := range plans {
+		if !originProbeSchedule.due(plan, now) {
+			results = append(results, originProbeSchedule.carried(plan)...)
+			continue
+		}
+		stepResults := plan.Run(ctx).Report.Results
+		originProbeSchedule.record(plan, now, stepResults)
+		results = append(results, stepResults...)
+	}
+
+	// Fold every export's plan into one report, so the coverage ledger spans the
+	// whole server rather than whichever export happened to be probed last.
+	recordSelfTest(server_structs.NewTestReport(
+		server_structs.SelfTestSuite,
+		server_structs.ExpectedEdges(server_structs.OriginType),
+		results,
+	))
 }
 
 // Start self-test monitoring of the origin/cache.  This will upload, download, and delete
