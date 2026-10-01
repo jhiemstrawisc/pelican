@@ -145,6 +145,21 @@ func (server *OriginServer) CreateAdvertisement(name, id, originUrlStr, originWe
 	// Get the overall health status as reported by the origin.
 	status := metrics.GetHealthStatus().OverallStatus
 
+	// Carry the reason behind that one word, so a federation administrator can
+	// diagnose this origin from the Director rather than needing an account on
+	// it. Origin.ShareHealthDetails lets an administrator withhold the free text
+	// -- not every origin is operated by the federation -- but never the outcome
+	// or the coverage, which the Director needs to route and to know what it has
+	// not been told.
+	redact := !param.Origin_ShareHealthDetails.GetBool()
+	health := metrics.GetHealthReport(redact)
+	if selfTest := server_utils.LastSelfTestReport(); selfTest != nil {
+		if redact {
+			selfTest = server_utils.RedactReport(selfTest)
+		}
+		health.SelfTest = selfTest
+	}
+
 	// For native (non-XRootD) origins co-located with a director, DataURL (which becomes
 	// ServerAd.URL) should have the /api/v1.0/origin/data prefix so the director redirects
 	// to the right endpoint. When the origin is standalone, older clients cannot handle
@@ -192,6 +207,7 @@ func (server *OriginServer) CreateAdvertisement(name, id, originUrlStr, originWe
 		DisableDirectorTest: !param.Origin_DirectorTest.GetBool(),
 		RequiredFeatures:    featureNames,
 		Status:              status,
+		Health:              &health,
 		Downtimes:           downtimes,
 	}
 	ad.Initialize(name)

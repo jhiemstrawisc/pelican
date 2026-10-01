@@ -1668,6 +1668,20 @@ type: bool
 default: true
 components: ["origin"]
 ---
+name: Origin.ShareHealthDetails
+description: |+
+  When true, the origin includes the reason a health test failed in the advertisement it sends to
+  the Director, so federation administrators have a single place to diagnose the health of the
+  services in their federation.
+
+  When false, the origin still reports *whether* its tests pass, and which parts of its data path
+  those tests covered -- the Director requires both to route requests correctly and to reason about
+  what it cannot see -- but withholds the free-text diagnostic detail. Set this to false if you
+  operate an origin whose failure detail should not be visible to the federation administrator.
+type: bool
+default: true
+components: ["origin"]
+---
 name: Origin.ProbeRealExports
 description: |+
   Whether the origin's self-test probes the storage behind each export, in addition to the synthetic

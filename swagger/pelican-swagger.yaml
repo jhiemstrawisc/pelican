@@ -41,6 +41,135 @@ securityDefinitions:
     description: >-
       Enter the JWT with the `Bearer` prefix, e.g. "Bearer abcde12345".
 definitions:
+  ServerHealthDetail:
+    type: object
+    description: >-
+      A server's health as the director understands it, keeping the director's own first-hand measurement
+      separate from the server's self-report. Merging the two into a single number is what previously made
+      the director act on its own probe results only after the observed server echoed them back.
+    properties:
+      directorProbe:
+        $ref: "#/definitions/TestReport"
+        description: This director's most recent probe of the server.
+      directorProbeAt:
+        type: integer
+        format: int64
+        description: When that probe ran, in epoch seconds.
+      reported:
+        $ref: "#/definitions/ServerHealth"
+        description: What the server most recently advertised about itself.
+      uncovered:
+        type: array
+        items:
+          type: string
+        description: >-
+          Parts of a client's request path that neither observer reached, e.g. `origin-data`, `fed-token`.
+          A server can be healthy on every other field and still have entries here; that combination is
+          exactly the region in which a client can fail while the director sees green.
+      detailWithheld:
+        type: boolean
+        description: >-
+          True when the origin's administrator set `Origin.ShareHealthDetails` to false, so diagnostic
+          detail was deliberately not shared. Outcomes and coverage are still reported. This distinguishes
+          "nothing was wrong" from "we were not told".
+        default: false
+  ServerHealth:
+    type: object
+    description: What an origin or cache reports about its own health in its advertisement.
+    properties:
+      overall:
+        type: string
+        description: The worst of the component statuses.
+      redacted:
+        type: boolean
+        description: True when free-text detail was withheld. Never suppresses outcomes or coverage.
+        default: false
+      components:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+            status:
+              type: string
+            message:
+              type: string
+              description: Omitted when redacted.
+            lastUpdate:
+              type: integer
+              format: int64
+      selfTest:
+        $ref: "#/definitions/TestReport"
+  TestReport:
+    type: object
+    description: >-
+      The outcome of one probe run, plus a record of which parts of a client's request path it actually
+      traversed. A pass that does not say what it covered cannot be told apart from a pass that covered
+      only a synthetic namespace no client reads.
+    properties:
+      suite:
+        type: string
+        description: "`self-test` or `director-test`"
+      outcome:
+        type: string
+        description: "`pass`, `degraded`, `fail`, or `skipped`. A skipped step is not a failure."
+      covered:
+        type: array
+        items:
+          type: string
+        description: Edges of the client path this run reached. Reaching a broken edge still counts as covering it.
+      uncovered:
+        type: array
+        items:
+          type: string
+        description: Edges a client depends on that this run did not reach.
+      results:
+        type: array
+        items:
+          type: object
+          properties:
+            binding:
+              type: object
+              description: Which namespace, storage, and issuer the step exercised.
+              properties:
+                namespace:
+                  type: string
+                storageKind:
+                  type: string
+                issuer:
+                  type: string
+                synthetic:
+                  type: boolean
+                  description: True for /pelican/monitoring, which is not backed by any export a client reads.
+            edges:
+              type: array
+              items:
+                type: string
+            op:
+              type: string
+              description: "`read`, `write`, `delete`, `list`, or `stat`"
+            outcome:
+              type: string
+            reason:
+              type: string
+              description: >-
+                Structured failure classification, e.g. `authorization`, `connection`, `timeout`,
+                `content-mismatch`, `storage`, `not-applicable`, `disabled`, `slow`.
+            detail:
+              type: string
+              description: Free text. Dropped when redacted.
+            httpStatus:
+              type: integer
+            latencyMs:
+              type: integer
+              format: int64
+            at:
+              type: integer
+              format: int64
+      at:
+        type: integer
+        format: int64
   HealthStatus:
     type: object
     description: The health status of a server component
@@ -633,8 +762,25 @@ definitions:
         default: false
       healthStatus:
         type: string
-        description: The status of director file transfer test against the server. Can be Initializing|Unknown|OK|Error
+        description: >-
+          DEPRECATED in favor of `healthDetail`. The status of the director's file transfer test against the
+          server. Can be `Initializing`, `Unknown`, `Not Applicable`, `Health Test Disabled`, `OK`, `Degraded`,
+          or `Error`. Only `Error` means a test ran and failed; the others all mean the director has no
+          result, for differing reasons. This field cannot express *why* a test failed -- use `healthDetail`.
         default: Unknown
+      serverStatus:
+        type: string
+        description: >-
+          DEPRECATED in favor of `healthDetail`. The aggregate health word the origin or cache reports about
+          itself, being the worst of its component statuses: `shutting down`, `critical`, `degraded`,
+          `warning`, `ok`, or `unknown`. Carries no reason.
+        default: ""
+      healthDetail:
+        $ref: "#/definitions/ServerHealthDetail"
+        description: >-
+          The fused view of a server's health: what this director measured itself, what the server reported
+          about itself, and which parts of a client's request path neither of them covered. Omitted entirely
+          when the director has neither a probe result nor a health block from the server.
       ioLoad:
         type: number
         description: The I/O load of the server, which is the average time spent waiting on I/O in the last 5 minutes.

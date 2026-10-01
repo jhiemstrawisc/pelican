@@ -716,6 +716,8 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Origin_SelfTestInterval.GetName(), "15s")
 	// Origin.SelfTestMaxAge
 	v.SetDefault(param.Origin_SelfTestMaxAge.GetName(), "1h")
+	// Origin.ShareHealthDetails
+	v.SetDefault(param.Origin_ShareHealthDetails.GetName(), true)
 	// Origin.StorageType
 	v.SetDefault(param.Origin_StorageType.GetName(), "posix")
 	// Origin.TransferRateLimit

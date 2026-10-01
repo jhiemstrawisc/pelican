@@ -20,11 +20,14 @@ package metrics
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/pelicanplatform/pelican/server_structs"
 )
 
 type (
@@ -181,6 +184,65 @@ func GetHealthStatus() HealthStatus {
 	})
 	status.OverallStatus = overallStatus.String()
 	return status
+}
+
+// GetHealthReport renders the component registry into the form that crosses the
+// wire to the Director, optionally withholding diagnostic detail.
+//
+// Until now the only thing a server told the Director about its health was the
+// single word from GetHealthStatus().OverallStatus. The registry has carried a
+// per-component Message all along -- it was simply dropped at the process
+// boundary, so the Director could see *that* a server was critical and never
+// *why*. This is the transport that was missing.
+//
+// redact is the Origin.ShareHealthDetails opt-out. It is deliberately bounded:
+// an origin may withhold free text, but never the outcome and never which parts
+// of its data path were covered. The Director needs the outcome to route at all,
+// and needs the coverage to reason about what it cannot see -- if redaction
+// could suppress coverage, opting out would silently buy a server the benefit of
+// the doubt, which is the opposite of what an opt-out should do. The gap is also
+// declared rather than silent: Redacted travels with the report.
+func GetHealthReport(redact bool) server_structs.ServerHealth {
+	report := server_structs.ServerHealth{
+		Overall:  StatusUnknown.String(),
+		Redacted: redact,
+	}
+
+	overall := StatusUnknown
+	healthStatus.Range(func(component, compstat any) bool {
+		stat, ok := compstat.(componentStatusInternal)
+		if !ok {
+			return true
+		}
+		name, ok := component.(HealthStatusComponent)
+		if !ok {
+			return true
+		}
+
+		entry := server_structs.ComponentHealth{
+			Name:       name.String(),
+			Status:     stat.Status.String(),
+			LastUpdate: stat.LastUpdate.Unix(),
+		}
+		if !redact {
+			entry.Message = stat.Message
+		}
+		report.Components = append(report.Components, entry)
+
+		if stat.Status < overall {
+			overall = stat.Status
+		}
+		return true
+	})
+
+	// Stable ordering keeps the advertisement diffable across cycles; sync.Map
+	// iteration order is not defined.
+	sort.Slice(report.Components, func(i, j int) bool {
+		return report.Components[i].Name < report.Components[j].Name
+	})
+
+	report.Overall = overall.String()
+	return report
 }
 
 // Get the current health status of a component.

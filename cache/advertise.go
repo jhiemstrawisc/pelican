@@ -55,6 +55,15 @@ func (server *CacheServer) CreateAdvertisement(name, id, originUrl, originWebUrl
 	// Get the overall health status as reported by the cache.
 	status := metrics.GetHealthStatus().OverallStatus
 
+	// Caches always share their reasons. There is no Cache.ShareHealthDetails to
+	// match Origin.ShareHealthDetails: a cache joins a federation to serve that
+	// federation's traffic, so letting it withhold why it is failing would let an
+	// underperforming cache stay opaque to the administrators routing to it.
+	health := metrics.GetHealthReport(false)
+	if selfTest := server_utils.LastSelfTestReport(); selfTest != nil {
+		health.SelfTest = selfTest
+	}
+
 	nsAds := server.GetNamespaceAds()
 	ad := server_structs.OriginAdvertise{
 		ServerID:            id,
@@ -64,6 +73,7 @@ func (server *CacheServer) CreateAdvertisement(name, id, originUrl, originWebUrl
 		WebURL:              originWebUrl,
 		Namespaces:          server.GetNamespaceAds(),
 		Status:              status,
+		Health:              &health,
 		Downtimes:           downtimes,
 	}
 	ad.Initialize(name)
