@@ -1,0 +1,208 @@
+import { Callout } from 'nextra/components'
+
+# Health Testing Your Origin
+
+Pelican continuously probes Origins and Caches to answer one question: **can a client still get its data?**
+This page explains what those probes actually check, how to read the results, and how to configure them.
+
+<Callout type="info">
+The short version for a busy administrator: set a `HealthProbeObject` on each read-only export, leave everything else at its defaults, and read the `healthDetail` field in your federation's Director when something goes wrong.
+</Callout>
+
+## What gets probed, and why it matters what
+
+An Origin is not healthy or unhealthy on its own. It is a proxy for a storage resource, and what fails is the *relationship* between the two: the data path, the authorization chain, the backend credentials.
+A probe is only meaningful to the extent that it travels the same route a client's request does.
+
+Pelican runs two kinds of probe, and they check different things:
+
+| Probe | Run by | What it establishes |
+| --- | --- | --- |
+| **Self-test** | Your Origin, against itself | That your exported storage is reachable through your own serving layer and authorization |
+| **Director test** | The federation's Director, against you | That your Origin is reachable *from the federation* and its tokens are accepted |
+
+Both matter. A self-test passing while the Director test fails usually means a networking or token-trust problem between you and the federation. The reverse usually means your storage is in trouble.
+
+### What gets probed on a Cache
+
+A Cache is two different systems depending on whether it already holds what was asked for, and the two paths share almost nothing.
+A request the Cache can satisfy from disk never resolves an upstream, never mints a federation token and never writes anything; a request it cannot do all three.
+
+So the Director's Cache probe reads the same object **twice**:
+
+1. The first read names an object carrying a fresh timestamp, which the Cache cannot already hold. Serving it forces the miss path: resolve upstream, fetch, commit to disk.
+2. The second read asks for that same object, now resident, and is served from local disk against the `.cinfo` the Cache generated during the first read. That is the hit path.
+
+Testing only the cold case is how a production failure that broke fetches *for cache hits only* went undetected: every probe ran cold, so every probe passed.
+
+<Callout type="info">
+The Cache's own self-test covers less than the Director's. It places an object on disk directly, along with a hand-written `.cinfo`, and reads it back — so it establishes that XRootD can serve a file someone put there, and nothing about resolving, fetching, or generating a real `.cinfo`. Those hops appear in its `uncovered` list rather than being quietly counted as passing.
+</Callout>
+
+The Director also probes a Cache on a **protected** namespace, `/pelican/monitoring/authTest`, which it advertises as requiring a token and refuses to serve without one. This is what establishes that a Cache can serve namespaces that are not public: it applies its SciTokens configuration on the way in and carries authorization on the way out. Nothing else a Cache is asked to serve on the federation's behalf is protected, so before this there was no evidence either way.
+
+One hop still has no probe: a Cache presenting the **federation token** it obtains from the Director. A Cache forwards its client's token upstream and attaches its own federation token only when the origin demands one, which the Director's synthetic origin does not. So `fed-token` appears in `uncovered` for every Cache. That is accurate rather than alarming, and no action is needed from you.
+
+### Why probes go inside your exports
+
+Earlier versions of Pelican probed only a synthetic `/pelican/monitoring` namespace.
+On an XRootD-backed Origin that namespace lives under `Origin.RunLocation`, **not** on your data volume — so a probe confined to it kept passing after the data volume was unmounted, and the Origin went on advertising itself as healthy while every client request failed.
+
+Pelican now probes the storage behind each export directly:
+
+- A **writable** export is probed by writing a small object into a reserved `.pelican-monitoring/` directory inside it, reading it back, and deleting it.
+- A **read-only** export is probed by reading an object you nominate, because Pelican cannot write one of its own to read back.
+
+<Callout type="warning">
+Real-export probing is currently enabled only for the natively-served backends (`posixv2`, `pstore`, `s3v2`, `httpsv2`, `globusv2`, `ssh`). On XRootD-fronted backends (`posix`, `s3`, `https`, `globus`, `xroot`) it is disabled pending an unresolved authorization issue, and those Origins fall back to the synthetic namespace probe. See `Origin.ProbeRealExports` below.
+</Callout>
+
+## Configuring health tests
+
+### Nominate a probe object for read-only exports
+
+This is the one setting most administrators need to change. Without it, a read-only export cannot be probed at all, and Pelican will report it as uncovered rather than as healthy.
+
+```yaml filename="pelican.yaml"
+Origin:
+  Exports:
+    - StoragePrefix: /mnt/data/ligo
+      FederationPrefix: /ligo/frames
+      Capabilities: ["PublicReads", "Reads", "Listings"]
+      # Any small object that will reliably exist. Pelican only reads it.
+      HealthProbeObject: .probe/heartbeat.txt
+```
+
+<Callout type="info">
+`HealthProbeObject` is **not** the same as `SentinelLocation`, despite the similar shape. `SentinelLocation` is checked once at startup so the Origin refuses to serve an export whose storage did not mount, and says nothing afterwards. `HealthProbeObject` is read on every health cycle for the life of the process. You may set either, both, or neither.
+</Callout>
+
+A **writable** export needs no probe object: its probe creates and removes its own.
+
+### The main knobs
+
+| Parameter | Default | What it does |
+| --- | --- | --- |
+| `Origin.SelfTest` | `true` | Whether the Origin runs its own probe loop |
+| `Origin.SelfTestInterval` | `15s` | How often |
+| `Origin.DirectorTest` | `true` | Whether the Origin accepts probes from the Director |
+| `Origin.ProbeRealExports` | `auto` | Whether probes touch your real storage (see below) |
+| `Origin.ShareHealthDetails` | `true` | Whether failure *reasons* are shared with the Director |
+| `Exports[].HealthProbeObject` | unset | The object a read-only export is probed with |
+| `Cache.SelfTest` | `true` | Whether the Cache runs its own probe loop |
+| `Cache.DirectorTest` | `true` | Whether the Cache accepts probes from the Director. Disabling it carries a routing penalty; see below |
+
+`Origin.ProbeRealExports` accepts `auto`, `true`, or `false`.
+`auto` decides per backend as described in the callout above. Set it explicitly only if you have a reason to override that.
+
+### Capabilities decide what runs
+
+Pelican never probes an operation you have not said you support.
+An Origin that does not advertise writes is never sent a write probe — it will not be marked unhealthy for declining to do something it never offered.
+
+There are two levels of capability, and they mean different things:
+
+- **`Origin.Enable*`** — what this Origin process can do against your storage *at all*, given its credentials and how the volume is mounted.
+- **`Exports[].Capabilities`** — what you are *willing* to offer for a particular namespace.
+
+A namespace may offer less than your storage can do, never more. If an export claims a capability your Origin-level settings do not support, Pelican logs an error at startup naming the namespace and the capability, and probes take the more restrictive of the two.
+
+### Withholding failure details
+
+By default your Origin tells the Director *why* a probe failed, so federation administrators can diagnose problems centrally without an account on your machine.
+
+If that is not appropriate for your site, set:
+
+```yaml filename="pelican.yaml"
+Origin:
+  ShareHealthDetails: false
+```
+
+This withholds free-text detail — error strings can contain filesystem paths — but the Origin still reports **whether** its tests pass and **which parts of its data path** they covered. The Director needs both to route requests correctly, and the withholding itself is declared, so nobody mistakes "we were not told" for "nothing was wrong".
+
+Caches have no equivalent setting: a Cache exists to serve the federation's traffic, so it does not get to hide its status from the administrators routing to it.
+
+## Reading the results
+
+### On your own Origin
+
+`GET /api/v1.0/metrics/health` on your Origin's web interface reports each component:
+
+| Component | Meaning |
+| --- | --- |
+| `xrootd` | Your self-test result |
+| `director` | The Director's most recent verdict about you |
+| `federation` | Whether you are successfully advertising |
+| `registry` | Whether your namespaces are registered |
+
+Each carries a message naming what failed and why.
+
+### In the Director
+
+The Director's server list exposes a `healthDetail` object per server:
+
+```json
+{
+  "healthStatus": "Error",
+  "serverStatus": "critical",
+  "healthDetail": {
+    "directorProbe": {
+      "outcome": "fail",
+      "covered": ["front", "authz"],
+      "uncovered": ["origin-data"],
+      "results": [{ "op": "read", "outcome": "fail", "reason": "not-found",
+                    "binding": { "namespace": "/ligo/frames" } }]
+    },
+    "reported": { "overall": "critical", "redacted": false },
+    "uncovered": ["origin-data"]
+  }
+}
+```
+
+The two things worth learning to read:
+
+**`reason`** classifies the failure so it can be acted on without parsing prose:
+
+| Reason | Usually means |
+| --- | --- |
+| `connection` | The server could not be reached at all |
+| `timeout` | It accepted the connection but did not answer in time |
+| `authorization` | A token was rejected — check issuer configuration and clock sync |
+| `not-found` | The object was missing — often storage that has gone away |
+| `content-mismatch` | Data was returned, but not the data that was written |
+| `storage` | The backend itself errored before any HTTP exchange |
+| `not-applicable` | Nothing was probed because nothing could be — not a failure |
+
+**`uncovered`** lists the parts of a client's path that *nothing* checked.
+This is the field to watch, because a server can be green on every other field and still have entries here. That combination means health testing is not looking at the thing you care about — for example an Origin whose exports have no `HealthProbeObject`, where a passing probe says nothing about whether your data is readable.
+
+### States that are not failures
+
+Only `Error` means a test ran and failed. These all mean the Director has no result, for different reasons, and none of them indicates something is broken:
+
+| State | Meaning |
+| --- | --- |
+| `Not Applicable` | Your capabilities make the probe meaningless |
+| `Health Test Disabled` | An administrator turned probes off |
+| `Initializing` | The first cycle has not finished |
+| `Unknown` | A result was expected and has not arrived |
+
+<Callout type="info">
+Caches are treated differently from Origins here. An Origin may disable Director tests without penalty — not every Origin is operated by the federation — and shows as *unverified* rather than failing. A Cache that disables them is both deprioritized in routing and shown as an error in the Director's web interface, because a Cache that refuses to be measured cannot be told apart from one that is failing, and should not rank equally with one that has been verified.
+
+Note that the advertisement carries the negation of these parameters, as `disableDirectorTest`. That is the field name to search for in Director logs and API responses.
+</Callout>
+
+## Troubleshooting
+
+**"My Origin says `warning` and I cannot see why."**
+Check `uncovered` first. A warning with a non-empty `uncovered` usually means nothing could be probed — most often a read-only export with no `HealthProbeObject`.
+
+**"My read-only Origin shows `Unknown` in the Director."**
+Expected. The Director has no object of its own in your monitoring namespace to read, so it cannot form a verdict. Your own self-test is what covers your exports; check `reported` in `healthDetail`.
+
+**"Probes fail with `authorization` right after I set them up."**
+Usually clock skew or an issuer mismatch. Confirm NTP is running, and that each export's `IssuerUrls` includes the issuer actually signing your tokens.
+
+**"I removed a volume and nothing noticed."**
+Check whether `Origin.ProbeRealExports` is in effect for your backend. On XRootD-fronted backends it is currently disabled, so only the synthetic namespace is probed — and that namespace does not live on your data volume.

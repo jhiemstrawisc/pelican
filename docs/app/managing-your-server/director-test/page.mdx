@@ -27,8 +27,25 @@ In a federation with several Directors, all of them write into the same `/pelica
 
 ## How the Director Tests a Cache
 
-For a Cache, the Director performs a single GET of a synthetic path such as `/pelican/monitoring/directorTest/<director-hostname>/<YYYY-MM-DD>/director-test-<timestamp>.txt` and checks the response body against a known test string.
-No Origin is involved: the Director itself serves the file content from its `/api/v1.0/director/healthTest` API, acting as the upstream for the request.
+A Cache is really two systems depending on whether it already holds what was asked for, and the two paths share almost nothing.
+A request it can satisfy from disk never resolves an upstream, never presents a token and never writes anything; a request it cannot do all three.
+The Director therefore runs three reads, and checks each response body against a known test string.
+
+1. A **cold** GET of a synthetic path such as `/pelican/monitoring/directorTest/<director-hostname>/<YYYY-MM-DD>/director-test-<timestamp>.txt`.
+   The name carries a fresh timestamp, so the Cache cannot already hold it and must resolve upstream, fetch, and commit to disk.
+2. A **warm** GET of that same object, now resident, served from local disk against the `.cinfo` the Cache generated during the first read.
+3. A cold GET under `/pelican/monitoring/authTest/...`, which the Director advertises as **non-public** and refuses to serve without a federation token.
+   This is what establishes that the Cache can serve a namespace that is not public: it applies its SciTokens configuration on the way in and carries authorization on the way out.
+
+No Origin is involved in any of them: the Director itself serves the file content from its `/api/v1.0/director/healthTest` API, acting as the upstream for the request.
+
+<Callout type="info">
+Reading twice is the point of steps 1 and 2. Testing only the cold case is how object fetches through Caches once broke in production for cache hits alone while every probe passed. The warm read exercises real `.cinfo`, which a Cache's own self-test cannot, because that test fabricates the file.
+</Callout>
+
+One hop still has no probe: a Cache presenting the federation token it obtains from the Director.
+A Cache forwards its client's token upstream and attaches its own only when the origin demands one, which the Director's synthetic origin does not.
+The Director reports that hop as uncovered rather than claiming it, so seeing `fed-token` in a Cache's uncovered list is expected and needs no action.
 
 Although the Director never uploads anything to the Cache, the Cache's XRootD proxy file cache (PFC) stores each fetched test object on disk as a side effect of caching it: a small (~100 byte) data file plus a companion `.cinfo` metadata file.
 After each successful test cycle, the Director evicts the previous cycle's test files by POSTing to the Cache.
@@ -43,11 +60,14 @@ Both are described below.
 
 ### Test File Layout
 
-Director test files on a Cache live under:
+Director test files on a Cache live under two trees, one per namespace the Director probes:
 
 ```
 /pelican/monitoring/directorTest/<director-hostname>/<YYYY-MM-DD>/director-test-<timestamp>.txt
+/pelican/monitoring/authTest/<director-hostname>/<YYYY-MM-DD>/director-test-<timestamp>.txt
 ```
+
+Both are swept by the same mechanisms, and the eviction endpoint accepts paths in either tree and nothing else.
 
 In federations with multiple Directors, each Director writes only into its own `<director-hostname>` subtree and only cleans up files it created, so Directors never interfere with each other's in-flight tests.
 The daily subdirectories keep any single directory small and allow whole days to be removed at once.
@@ -55,7 +75,7 @@ The daily subdirectories keep any single directory small and allow whole days to
 ### How Cleanup Works
 
 **Director-initiated eviction (primary).**
-After each successful test cycle, the Director asks the Cache to evict the previous cycle's test file by calling `POST /api/v1.0/cache/evictTestFile` with a federation-issued token.
+After each successful test cycle, the Director asks the Cache to evict every object the previous cycle left behind, calling `POST /api/v1.0/cache/evictTestFile` once per object with a federation-issued token.
 The Cache validates the token and the requested path (it must match the director test layout above), then calls the evict endpoint of its own XRootD server, `/pelican/api/v1.0/evict`, which is provided by the `xrdhttp-pelican` plugin loaded into the Cache's XRootD.
 The plugin asks XRootD's PFC to mark the file as a purge candidate.
 
@@ -74,3 +94,6 @@ When `Server.DropPrivileges` is enabled, the Pelican process cannot delete XRoot
 - `Director.OriginCacheHealthTestInterval`: how often the Director tests each Origin/Cache (default `15s`).
 - `Server.Hostname` (on the Director): the hostname used for the per-director subtree; the Director errors at startup if it cannot be determined.
 - Director tests are distinct from the Origin/Cache's own self-tests, which are controlled by `Origin.SelfTest` and `Cache.SelfTest`.
+- `Origin.DirectorTest` and `Cache.DirectorTest`: whether the server accepts these tests at all. An Origin may decline without penalty and is shown as unverified; a Cache that declines is deprioritized in routing and shown as an error.
+
+This page describes the mechanism. For what the results mean, which parts of a server's data path each test covers, and how to read the `healthDetail` the Director reports, see [Health Testing Your Origin](/federating-your-data/health-testing).

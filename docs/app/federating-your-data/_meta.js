@@ -6,5 +6,6 @@ export default {
     "globus-backend": "Globus Backend",
     "ssh-backend": "SSH Backend",
     "standalone-origin": "Running a Standalone Origin",
+    "health-testing": "Health Testing Your Origin",
     "generating-tokens": "Generating Tokens",
 }
