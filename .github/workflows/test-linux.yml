@@ -142,6 +142,18 @@ jobs:
             ./local_cache \
             ./...
 
+      # fed_test_utils supports TEST_POSIXV2=1 to swap the origin backend, but
+      # nothing ran with it set -- which is part of why posixv2 origins went a
+      # release without self tests (issue #3445). Scoped to the federation
+      # packages so it costs a fraction of a full second matrix leg.
+      - name: Run federation tests against a posixv2 origin
+        if: matrix.binary_name == 'pelican-server' && !inputs.race_detection
+        env:
+          TEST_POSIXV2: "1"
+        run: |
+          go test -timeout=15m -tags=${{ matrix.tags }} \
+            ./e2e_fed_tests/... ./director/... ./origin/... ./xrootd/...
+
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -241,3 +253,6 @@ jobs:
         run: ./github_scripts/site_local_cache_test.sh
       - name: Run end-to-end test for Cache Availability/Stat weighting
         run: ./github_scripts/cache_availability_test.sh
+      - name: Run end-to-end test for origin storage health detection
+        if: matrix.binary_name == 'pelican-server'
+        run: ./github_scripts/health_storage_failure_test.sh

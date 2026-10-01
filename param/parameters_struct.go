@@ -410,6 +410,7 @@ type Config struct {
 			KeepaliveInterval time.Duration `mapstructure:"keepaliveinterval" yaml:"KeepaliveInterval"`
 			Prefix string `mapstructure:"prefix" yaml:"Prefix"`
 		} `mapstructure:"posc" yaml:"Posc"`
+		ProbeRealExports string `mapstructure:"proberealexports" yaml:"ProbeRealExports"`
 		RunLocation string `mapstructure:"runlocation" yaml:"RunLocation"`
 		S3AccessKeyfile string `mapstructure:"s3accesskeyfile" yaml:"S3AccessKeyfile"`
 		S3Bucket string `mapstructure:"s3bucket" yaml:"S3Bucket"`
@@ -1003,6 +1004,7 @@ type configWithType struct {
 			KeepaliveInterval struct { Type string; Value time.Duration }
 			Prefix struct { Type string; Value string }
 		}
+		ProbeRealExports struct { Type string; Value string }
 		RunLocation struct { Type string; Value string }
 		S3AccessKeyfile struct { Type string; Value string }
 		S3Bucket struct { Type string; Value string }

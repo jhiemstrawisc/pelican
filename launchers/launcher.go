@@ -204,6 +204,14 @@ func LaunchModules(ctx context.Context, modules server_structs.ServerType) (serv
 		if err != nil && !ok {
 			return
 		}
+
+		// A namespace may offer less than its backing store can do, never more.
+		// Reported once, here, to the person who can fix it -- rather than as a
+		// health test that fails every fifteen seconds and blames the storage for
+		// what is actually a configuration contradiction.
+		for _, capErr := range server_utils.ValidateOriginCapabilities(originExports, server_utils.OriginStoreCapabilities()) {
+			log.Errorln("Invalid origin capability configuration:", capErr)
+		}
 	}
 
 	var pc *local_cache.PersistentCache

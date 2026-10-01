@@ -670,6 +670,8 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Origin_Posc_KeepaliveInterval.GetName(), "19m")
 	// Origin.Posc.Prefix
 	v.SetDefault(param.Origin_Posc_Prefix.GetName(), ".pelican-posc")
+	// Origin.ProbeRealExports
+	v.SetDefault(param.Origin_ProbeRealExports.GetName(), "auto")
 	// Origin.RunLocation
 	if isRoot {
 		v.SetDefault(param.Origin_RunLocation.GetName(), "/run/pelican/xrootd/origin")

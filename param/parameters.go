@@ -441,6 +441,7 @@ var runtimeConfigurableMap = map[string]bool{
 	"Origin.Posc.FileTimeout": false,
 	"Origin.Posc.KeepaliveInterval": false,
 	"Origin.Posc.Prefix": false,
+	"Origin.ProbeRealExports": false,
 	"Origin.RunLocation": false,
 	"Origin.S3AccessKeyfile": false,
 	"Origin.S3Bucket": false,
@@ -777,6 +778,7 @@ var stringAccessors = map[string]func(*Config) string{
 	"Origin.PStoreLocation": func(c *Config) string { return c.Origin.PStoreLocation },
 	"Origin.PStoreMetadataBackupLocation": func(c *Config) string { return c.Origin.PStoreMetadataBackupLocation },
 	"Origin.Posc.Prefix": func(c *Config) string { return c.Origin.Posc.Prefix },
+	"Origin.ProbeRealExports": func(c *Config) string { return c.Origin.ProbeRealExports },
 	"Origin.RunLocation": func(c *Config) string { return c.Origin.RunLocation },
 	"Origin.S3AccessKeyfile": func(c *Config) string { return c.Origin.S3AccessKeyfile },
 	"Origin.S3Bucket": func(c *Config) string { return c.Origin.S3Bucket },
@@ -1757,6 +1759,7 @@ var allParameterNames = []string{
 	"Origin.Posc.FileTimeout",
 	"Origin.Posc.KeepaliveInterval",
 	"Origin.Posc.Prefix",
+	"Origin.ProbeRealExports",
 	"Origin.RunLocation",
 	"Origin.S3AccessKeyfile",
 	"Origin.S3Bucket",
@@ -2066,6 +2069,7 @@ var (
 	Origin_PStoreLocation = StringParam{"Origin.PStoreLocation"}
 	Origin_PStoreMetadataBackupLocation = StringParam{"Origin.PStoreMetadataBackupLocation"}
 	Origin_Posc_Prefix = StringParam{"Origin.Posc.Prefix"}
+	Origin_ProbeRealExports = StringParam{"Origin.ProbeRealExports"}
 	Origin_RunLocation = StringParam{"Origin.RunLocation"}
 	Origin_S3AccessKeyfile = StringParam{"Origin.S3AccessKeyfile"}
 	Origin_S3Bucket = StringParam{"Origin.S3Bucket"}
@@ -2623,6 +2627,7 @@ func init() {
 		"Origin.PStoreLocation": Origin_PStoreLocation,
 		"Origin.PStoreMetadataBackupLocation": Origin_PStoreMetadataBackupLocation,
 		"Origin.Posc.Prefix": Origin_Posc_Prefix,
+		"Origin.ProbeRealExports": Origin_ProbeRealExports,
 		"Origin.RunLocation": Origin_RunLocation,
 		"Origin.S3AccessKeyfile": Origin_S3AccessKeyfile,
 		"Origin.S3Bucket": Origin_S3Bucket,

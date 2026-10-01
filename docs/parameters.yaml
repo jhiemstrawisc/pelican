@@ -1057,6 +1057,15 @@ description: |+
       When clients need to bootstrap access tokens using OAuth2 flows, they'll use the first URL in this list for bootstrapping.
       If no URLs are provided but a defined namespace capability for the export requires tokens (`Reads`, `Writes`), the derived
       value from `${Server.IssuerUrl}` will be used.
+  - HealthProbeObject: The name of an object under this export that the origin may read, repeatedly and
+      indefinitely, to verify the export's storage is still reachable. Required for a read-only export to be
+      health tested at all, because the origin cannot write an object of its own to read back; a writable
+      export needs no such object, since its probe mints and removes one under a reserved sub-prefix.
+
+      This is deliberately separate from SentinelLocation despite the similar shape. SentinelLocation is a
+      one-time boot assertion that refuses to serve an export whose storage did not mount, and says nothing
+      afterward; HealthProbeObject is read on every health cycle for the life of the process. An administrator
+      may reasonably configure either without the other.
   - Capabilities: A list of the capabilities the origin is willing to support for the given export. Capabilities include:
       ["Reads", "PublicReads", "Writes", "Listings", "DirectReads"]
       where each of these has the same effect as the corresponding "Origin.Enable*" configuration, except scoped to the
@@ -1316,6 +1325,12 @@ description: |+
 
   NOTE: This config option is meant to configure an _origin's_ capabilities, but can be used to configure a namespace when the origin
   exports only a single prefix or when every exported namespace should inherit the same configuration.
+
+  This knob expresses what the origin process can do to its **backing store**: whether the credentials,
+  the mount, and the backend permit the operation at all. An export's own `Capabilities` express something
+  different -- what the origin is *willing* to do on behalf of a particular federation prefix. An export may
+  offer less than the store can do; it may not offer more, and Pelican logs an error at startup if one tries.
+
 type: bool
 default: true
 components: ["origin"]
@@ -1326,6 +1341,12 @@ description: |+
 
   NOTE: This config option is meant to configure an _origin's_ capabilities, but can be used to configure a namespace when the origin
   exports only a single prefix or when every exported namespace should inherit the same configuration.
+
+  This knob expresses what the origin process can do to its **backing store**: whether the credentials,
+  the mount, and the backend permit the operation at all. An export's own `Capabilities` express something
+  different -- what the origin is *willing* to do on behalf of a particular federation prefix. An export may
+  offer less than the store can do; it may not offer more, and Pelican logs an error at startup if one tries.
+
 type: bool
 default: true
 components: ["origin"]
@@ -1336,6 +1357,12 @@ description: |+
 
   NOTE: This config option is meant to configure an _origin's_ capabilities, but can be used to configure a namespace when the origin
   exports only a single prefix or when every exported namespace should inherit the same configuration.
+
+  This knob expresses what the origin process can do to its **backing store**: whether the credentials,
+  the mount, and the backend permit the operation at all. An export's own `Capabilities` express something
+  different -- what the origin is *willing* to do on behalf of a particular federation prefix. An export may
+  offer less than the store can do; it may not offer more, and Pelican logs an error at startup if one tries.
+
 type: bool
 default: true
 components: ["origin"]
@@ -1628,9 +1655,47 @@ name: Origin.DirectorTest
 description: |+
   A bool indicating whether the director should send file transfer tests to the origin.
 
-  If `Origin.StorageType` is set to values other than `POSIX`, this parameter is set to false.
+  The storage backend no longer overrides this. Earlier releases forced it to false whenever
+  `Origin.StorageType` was anything but `posix`, which left S3-, HTTPS-, and Globus-backed origins
+  unobservable and permanently reported as critical. What the director sends is now decided by the
+  capabilities the origin advertises: an origin that does not enable writes is never sent a write
+  probe, whatever backend it runs.
+
+  Setting this to false means the director records no result for this origin. That is not treated as
+  a failure for an origin, but the director cannot vouch for what it has not measured, and the origin
+  is shown as unverified in the director's web UI.
 type: bool
 default: true
+components: ["origin"]
+---
+name: Origin.ProbeRealExports
+description: |+
+  Whether the origin's self-test probes the storage behind each export, in addition to the synthetic
+  `/pelican/monitoring` namespace.
+
+  This is the difference between a health test that proves the server is running and one that proves the data
+  clients read is still reachable. On an XRootD-fronted origin `/pelican/monitoring` resolves under
+  `Origin.RunLocation`, while exports are symlinks to the administrator's volume -- so unmounting that volume
+  leaves every probe passing while every client request fails. When enabled, a writable export is probed with
+  a write/read/delete cycle under a reserved `.pelican-monitoring` directory inside it, and a read-only
+  export is probed by reading the object named in its `HealthProbeObject`.
+
+  Accepts `auto` (the default), `true`, or `false`.
+
+  `auto` chooses per storage backend, because the obstacle is per backend:
+
+  - Natively-served backends (`posixv2`, `pstore`, `s3v2`, `httpsv2`, `globusv2`, `ssh`) probe real exports.
+    Pelican authorizes these requests itself, and a probe token issued by the origin's own web URL satisfies
+    that check.
+  - XRootD-fronted backends (`posix`, `s3`, `https`, `globus`, `xroot`) do not. Authorization there is the
+    generated `scitokens.cfg` plus the generated authfile, where probes into an export are refused with a
+    permission error for reasons not yet established. Forcing this to `true` on such an origin is expected to
+    produce health failures that are configuration artifacts rather than real faults.
+
+  This is a string rather than a boolean deliberately: viper reports a parameter as "set" once a default
+  exists, so a boolean cannot distinguish "the administrator chose false" from "nobody chose anything".
+type: string
+default: auto
 components: ["origin"]
 ---
 name: Origin.SelfTest

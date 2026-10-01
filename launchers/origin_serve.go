@@ -202,15 +202,27 @@ func OriginServe(ctx context.Context, engine *gin.Engine, egrp *errgroup.Group, 
 		}
 	}
 
+	// The self-test probes the origin over HTTP at its own data URL, which every
+	// backend serves -- XRootD-fronted or native. It used to be started only
+	// inside the XRootD branch below, so the native backends (posixv2, pstore,
+	// s3v2, httpsv2, globusv2, ssh) never self-tested at all, and pstore in
+	// particular was marked as supporting self-tests while never receiving one.
+	if param.Origin_SelfTest.GetBool() {
+		// Probes write into a reserved sub-prefix inside each export, and neither
+		// XRootD nor the native WebDAV handler creates parent directories on PUT.
+		// This is the single call site, and it runs before XRootD is configured
+		// below, so the directories exist by the time either serving layer starts.
+		if err := origin.ConfigureExportProbeDirs(); err != nil {
+			return nil, err
+		}
+		xrootd.PeriodicSelfTest(ctx, egrp, true)
+	}
+
 	// Handle XRootD-specific initialization
 	if useXRootD {
 		configPath, err := xrootd.ConfigXrootd(ctx, true)
 		if err != nil {
 			return nil, err
-		}
-
-		if param.Origin_SelfTest.GetBool() {
-			xrootd.PeriodicSelfTest(ctx, egrp, true)
 		}
 
 		privileged := param.Origin_Multiuser.GetBool()

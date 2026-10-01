@@ -31,6 +31,7 @@ import (
 
 	"github.com/pelicanplatform/pelican/config"
 	"github.com/pelicanplatform/pelican/param"
+	"github.com/pelicanplatform/pelican/server_structs"
 	"github.com/pelicanplatform/pelican/server_utils"
 )
 
@@ -60,6 +61,59 @@ func ConfigureXrootdMonitoringDir() error {
 	if err = os.Chown(pelicanMonitoringPath, uid, -1); err != nil {
 		return errors.Wrapf(err, "Unable to change ownership of pelican file transfer monitoring directory %v"+
 			" to desired daemon user %v", pelicanMonitoringPath, username)
+	}
+
+	return nil
+}
+
+// ConfigureExportProbeDirs pre-creates the reserved probe directory inside each
+// local export.
+//
+// XRootD does not create parent directories on PUT -- which is precisely why
+// ConfigureXrootdMonitoringDir above exists -- so a probe writing into
+// <export>/.pelican-monitoring/ fails with a permission error unless the
+// directory is already there.
+//
+// Only local-filesystem backends need this. Object stores create keys
+// implicitly, so there is no directory to make, and their StoragePrefix is not a
+// host path to make it at.
+func ConfigureExportProbeDirs() error {
+	storageType := server_structs.OriginStorageType(param.Origin_StorageType.GetString())
+	if !storageType.Profile().LocalFilesystem {
+		return nil
+	}
+
+	exports, err := server_utils.GetOriginExports()
+	if err != nil {
+		return errors.Wrap(err, "unable to read origin exports to create health probe directories")
+	}
+
+	uid, err := config.GetDaemonUID()
+	if err != nil {
+		return err
+	}
+	gid, err := config.GetDaemonGID()
+	if err != nil {
+		return err
+	}
+
+	for _, export := range exports {
+		// Only writable exports get probe objects written into them.
+		if !export.Capabilities.Writes {
+			continue
+		}
+		probeDir := filepath.Join(export.StoragePrefix, server_utils.ProbeReservedPrefix)
+		if err := config.MkdirAll(probeDir, 0755, uid, gid); err != nil {
+			// A single unwritable export should not stop the origin from starting;
+			// its probe will fail and say so, which is the correct signal.
+			log.Warningf("Unable to create health probe directory %s for export %s; "+
+				"write probes against this export will fail: %v",
+				probeDir, export.FederationPrefix, err)
+			continue
+		}
+		if err := os.Chown(probeDir, uid, gid); err != nil {
+			log.Warningf("Unable to change ownership of health probe directory %s: %v", probeDir, err)
+		}
 	}
 
 	return nil

@@ -2194,28 +2194,21 @@ func InitServer(ctx context.Context, currentServers server_structs.ServerType) e
 	// of Origin.StorageType to "posix" and Origin.SelfTest to true. After these defaults are applied,
 	// it becomes impossible to determine if the values are coming from the default settings or from user input.
 	//
-	// Self-test and director-test write a probe file and read it back, so they require a
-	// POSIX-like backend (posix, posixv2). Disable them on remote-protocol backends.
-	if currentServers.IsEnabled(server_structs.OriginType) {
-		storageType := server_structs.OriginStorageType(param.Origin_StorageType.GetString())
-		if !storageType.SupportsSelfTest() {
-			updates := make(map[string]interface{})
-			if param.Origin_SelfTest.GetBool() {
-				log.Warningf("%s may not be enabled when the origin is configured with non-POSIX-like backends. Turning off...", param.Origin_SelfTest.GetName())
-				updates[param.Origin_SelfTest.GetName()] = false
-			}
-			if param.Origin_DirectorTest.GetBool() {
-				log.Warningf("%s may not be enabled when the origin is configured with non-POSIX-like backends. Turning off...", param.Origin_DirectorTest.GetName())
-				updates[param.Origin_DirectorTest.GetName()] = false
-			}
-			if len(updates) > 0 {
-				if err := param.MultiSet(updates); err != nil {
-					logging.FlushLogs(true)
-					return err
-				}
-			}
-		}
-	}
+	// Health testing is no longer switched on and off by storage type.
+	//
+	// This used to force both Origin.SelfTest and Origin.DirectorTest to false for
+	// every non-POSIX-like backend, on the premise that such an origin cannot take
+	// a write probe. That confuses cost with capability: a writable S3 bucket takes
+	// writes perfectly well, they are merely dearer. The blanket rewrite is what
+	// left the AWS public-data origins permanently critical -- unobservable by
+	// construction, while the Director kept writing to a store it had been told
+	// nothing about -- and it silently overrode what the administrator asked for.
+	//
+	// What replaced it: probe plans are derived from the capabilities an export
+	// declares, bounded by what the store can do, so an origin claiming no write
+	// capability is sent no PUT whatever backend it runs; and backends whose writes
+	// are expensive get a slower write cadence rather than no probe at all.
+	// See https://github.com/PelicanPlatform/pelican/issues/2713.
 
 	if err := SetServerDefaults(viper.GetViper()); err != nil {
 		logging.FlushLogs(true)
