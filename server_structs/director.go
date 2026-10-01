@@ -144,6 +144,10 @@ type (
 		Downtimes              []Downtime        `json:"downtimes"`              // Would be an empty slice if no downtime
 		RequiredFeatures       []string          `json:"requiredFeatures"`       // A list of feature names required by this server
 		Status                 string            `json:"status"`
+		// Health carries the reason behind Status, along with which parts of the
+		// server's data path its own tests covered. Nil for servers predating it,
+		// in which case Status is all the Director has.
+		Health *ServerHealth `json:"health,omitempty"`
 	}
 
 	// The struct holding a server's advertisement (including ServerAd and NamespaceAd)
@@ -170,9 +174,19 @@ type (
 		// highest priority over GeoIP overrides and MaxMind lookups on the director.
 		// Set this via the GeoLocation config parameter ("lat,lon" string).
 		Coordinate *Coordinate `json:"coordinate,omitempty"`
-		// TODO: Deprecate top level "Origin" caps -- each namespace should have its own caps that
-		// express what the origin is willing to do on the namespace's behalf. This helps us work
-		// around the lack of a concept for "globally-defined" namespaces.
+		// Top-level "Origin" caps are NOT redundant with per-namespace caps, and are
+		// not slated for removal. They answer a different question: what this origin
+		// process can do against its backing store at all, given its backend, its
+		// credentials, and how the storage is mounted. Namespace caps answer what the
+		// origin is willing to do on behalf of a particular prefix.
+		//
+		// Namespace policy is bounded by store ability -- an export may offer less
+		// than the store can do, never more -- and Capabilities.Intersect applies
+		// that clamp. See server_structs/capabilities.go and
+		// docs/health-testing-design.md.
+		//
+		// (This supersedes a longstanding TODO here that proposed deprecating the
+		// top-level caps outright.)
 		Caps                Capabilities      `json:"capabilities"`
 		Namespaces          []NamespaceAd     `json:"namespaces"`
 		Issuer              []TokenIssuer     `json:"token-issuer"`
@@ -182,12 +196,21 @@ type (
 		RequiredFeatures    []string          `json:"requiredFeatures"`
 		Now                 time.Time         `json:"now"`    // Populated when ad is sent to the director; otherwise, may be zero.  Used to detect time skews between client and server
 		Status              string            `json:"status"` // The status of the server ad. This is a human-readable string that describes the server's status.
+		// Health carries the reason behind Status, plus the coverage its self-test
+		// achieved. Omitted entirely when the server predates the field; an origin
+		// whose administrator set Origin.ShareHealthDetails to false still sends
+		// it, with Redacted set and the free-text detail stripped.
+		Health *ServerHealth `json:"health,omitempty"`
 	}
 
 	DirectorTestResult struct {
 		Status    string `json:"status"`
 		Message   string `json:"message"`
 		Timestamp int64  `json:"timestamp"` // Unix time, the number of seconds elapsed since January 1, 1970 UTC.
+		// Report is the structured form of Message, so an origin administrator
+		// sees the same detail in their own web UI that the federation
+		// administrator sees in the Director's. Older servers ignore it.
+		Report *TestReport `json:"report,omitempty"`
 	}
 	GetPrefixByPathRes struct {
 		Prefix string `json:"prefix"`

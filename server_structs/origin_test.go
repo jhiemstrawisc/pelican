@@ -25,11 +25,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestOriginStorageType_SupportsSelfTest pins down which backends accept the
-// write-read probe, so a future contributor can't silently flip an entry and
-// have the origin self-test and director test start probing a remote-protocol
-// backend -- which would mean egress and credentials on every health check.
-func TestOriginStorageType_SupportsSelfTest(t *testing.T) {
+// TestOriginStorageType_HasCheapWrites pins down which backends can absorb a
+// scratch write on the ordinary probe cadence.
+//
+// Note what a false answer now means: a slower write-probe cadence, not the
+// absence of health testing. This used to be SupportsSelfTest, and false there
+// disabled probing entirely, which is why S3-backed origins were unobservable.
+func TestOriginStorageType_HasCheapWrites(t *testing.T) {
 	cases := []struct {
 		in       OriginStorageType
 		expected bool
@@ -48,13 +50,13 @@ func TestOriginStorageType_SupportsSelfTest(t *testing.T) {
 		{OriginStorageGlobusv2, false},
 		{OriginStorageXRoot, false},
 
-		// Unknown / unset values must not be probed.
+		// Unknown / unset values get the conservative zero profile.
 		{OriginStorageType(""), false},
 		{OriginStorageType("does-not-exist"), false},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.in), func(t *testing.T) {
-			assert.Equal(t, tc.expected, tc.in.SupportsSelfTest())
+			assert.Equal(t, tc.expected, tc.in.HasCheapWrites())
 		})
 	}
 }
@@ -116,8 +118,9 @@ func TestOriginStorageType_IsPosixLike(t *testing.T) {
 			"%s does not store data at a host path", notHostPath)
 	}
 
-	// The two predicates disagree on pstore, and that disagreement is the point.
-	assert.True(t, OriginStoragePStore.SupportsSelfTest())
+	// The two facts disagree on pstore, and that disagreement is the point: it is
+	// local and cheap to write, but its StoragePrefix is not a host path.
+	assert.True(t, OriginStoragePStore.HasCheapWrites())
 	assert.False(t, OriginStoragePStore.IsPosixLike())
 }
 

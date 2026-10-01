@@ -60,53 +60,93 @@ var (
 	ErrUnknownOriginStorageType = errors.New("unknown origin storage type")
 )
 
-// SupportsSelfTest reports whether the origin can accept the write-read probe
-// that the origin self-test and the director test rely on.
+// StorageTypeProfile describes what a backend can do, as data rather than as a
+// set of scattered type switches.
 //
-// The probe writes a small object and reads it back, so it needs a backend the
-// origin can write to directly and cheaply. That rules out the
-// remote-protocol backends (S3, HTTPS, Globus, SSH, XRoot), where the probe
-// would mean egress and credentials for every health check.
+// Every question the rest of Pelican asks about a storage type is answered from
+// one row here. Before, three separate predicates -- SupportsSelfTest,
+// IsPosixLike, UsesXRootD -- each carried their own switch statement and their
+// own default for unlisted types, so adding a backend meant remembering all
+// three and the compiler helped with none of them. Two of them silently
+// disagreed: pstore reported that it supports self-tests while the launcher,
+// keyed off UsesXRootD, never started one for it.
 //
-// Note that this is a different question from IsPosixLike: pstore is not a
-// POSIX filesystem and its StoragePrefix is not a host path, but it is local
-// and writable, so it can self-test.
-func (t OriginStorageType) SupportsSelfTest() bool {
-	switch t {
-	case OriginStoragePosix, OriginStoragePosixv2, OriginStoragePStore:
-		return true
-	default:
-		return false
-	}
+// Adding a backend is now one entry in storageTypeProfiles. Anything a probe
+// needs beyond these declarative facts belongs in a ProbeSeeder, which is the
+// behavioral escape hatch for backends that must place a probe object out of
+// band.
+type StorageTypeProfile struct {
+	// ServedByXRootD reports whether an XRootD process fronts this backend, as
+	// opposed to the pelican process serving it natively.
+	ServedByXRootD bool
+
+	// LocalFilesystem reports whether an export's StoragePrefix names a directory
+	// on this host, so it can be walked, stat'd, or opened as an os.Root.
+	//
+	// pstore is deliberately false: its StoragePrefix is a path inside the store's
+	// own namespace, not on the filesystem -- "/" is a perfectly ordinary value
+	// for it -- so resolving one against the local filesystem reads something
+	// else entirely, or the host's root directory.
+	LocalFilesystem bool
+
+	// CheapWrites reports whether writing a small scratch object costs about what
+	// writing to a local disk costs.
+	//
+	// This is a cost signal, not a permission one. Whether an origin *may* write
+	// is a capability question answered by its configuration; this says only
+	// whether doing so every fifteen seconds is reasonable. Remote-protocol
+	// backends are false because a probe there means egress and a credentialed
+	// round trip on every health check, so their write probes run on a slower
+	// cadence rather than not at all.
+	CheapWrites bool
+}
+
+// storageTypeProfiles is the single table describing every backend.
+//
+// A type absent from this map gets the zero profile, which is the conservative
+// reading: not local, not cheap to write, and not XRootD-fronted. That last one
+// matters -- an unknown backend that silently defaulted to "XRootD fronts this"
+// would have Pelican try to launch and configure a process for it.
+var storageTypeProfiles = map[OriginStorageType]StorageTypeProfile{
+	OriginStoragePosix:    {ServedByXRootD: true, LocalFilesystem: true, CheapWrites: true},
+	OriginStoragePosixv2:  {ServedByXRootD: false, LocalFilesystem: true, CheapWrites: true},
+	OriginStoragePStore:   {ServedByXRootD: false, LocalFilesystem: false, CheapWrites: true},
+	OriginStorageSSH:      {ServedByXRootD: false, LocalFilesystem: false, CheapWrites: false},
+	OriginStorageS3:       {ServedByXRootD: true, LocalFilesystem: false, CheapWrites: false},
+	OriginStorageS3v2:     {ServedByXRootD: false, LocalFilesystem: false, CheapWrites: false},
+	OriginStorageHTTPS:    {ServedByXRootD: true, LocalFilesystem: false, CheapWrites: false},
+	OriginStorageHTTPSv2:  {ServedByXRootD: false, LocalFilesystem: false, CheapWrites: false},
+	OriginStorageGlobus:   {ServedByXRootD: true, LocalFilesystem: false, CheapWrites: false},
+	OriginStorageGlobusv2: {ServedByXRootD: false, LocalFilesystem: false, CheapWrites: false},
+	OriginStorageXRoot:    {ServedByXRootD: true, LocalFilesystem: false, CheapWrites: false},
+}
+
+// Profile returns the backend's declarative facts.
+func (t OriginStorageType) Profile() StorageTypeProfile {
+	return storageTypeProfiles[t]
 }
 
 // IsPosixLike reports whether an export's StoragePrefix names a directory on
 // this host, so it can be walked, stat'd, or opened as an os.Root.
-//
-// pstore is deliberately excluded. Its StoragePrefix is a path inside the
-// store's own namespace, not on the filesystem -- "/" is a perfectly ordinary
-// value for it -- so resolving one against the local filesystem reads
-// something else entirely, or the host's root directory.
 func (t OriginStorageType) IsPosixLike() bool {
-	switch t {
-	case OriginStoragePosix, OriginStoragePosixv2:
-		return true
-	default:
-		return false
-	}
+	return t.Profile().LocalFilesystem
 }
 
 // UsesXRootD reports whether an origin of this storage type is fronted by an
-// XRootD process. The native "v2" backends (and SSH) are served directly by
-// the pelican process and never launch XRootD. New native backends should be
-// added here rather than duplicating the list of storage-type comparisons.
+// XRootD process.
 func (t OriginStorageType) UsesXRootD() bool {
-	switch t {
-	case OriginStoragePosixv2, OriginStorageSSH, OriginStorageS3v2, OriginStorageHTTPSv2, OriginStorageGlobusv2, OriginStoragePStore:
-		return false
-	default:
-		return true
-	}
+	return t.Profile().ServedByXRootD
+}
+
+// HasCheapWrites reports whether a scratch write against this backend is cheap
+// enough to perform on the ordinary probe cadence.
+//
+// Note what this no longer decides: whether the origin is probed at all. That
+// used to be SupportsSelfTest, and a false answer disabled health testing
+// outright, which is why S3-backed origins were unobservable. Cost now selects a
+// cadence; capability decides what runs.
+func (t OriginStorageType) HasCheapWrites() bool {
+	return t.Profile().CheapWrites
 }
 
 // Convert a string to an OriginStorageType
