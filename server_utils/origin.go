@@ -59,9 +59,30 @@ type (
 		GlobusCollectionID   string `json:"globusCollectionID,omitempty"`
 		GlobusCollectionName string `json:"globusCollectionName,omitempty"`
 
-		// Capabilities for the export
-		Capabilities     server_structs.Capabilities `json:"capabilities"`
-		SentinelLocation string                      `json:"sentinelLocation"`
+		// Capabilities for the export.
+		//
+		// These express NAMESPACE POLICY: what this origin is willing to do on
+		// behalf of this federation prefix. They are bounded by, and distinct
+		// from, the top-level Origin.Enable* settings, which express STORE
+		// ABILITY -- what the process can do to its backing store at all. An
+		// export may offer less than the store can do; it may not offer more.
+		Capabilities server_structs.Capabilities `json:"capabilities"`
+
+		// SentinelLocation names an object whose presence is asserted once, at
+		// startup, so the origin refuses to serve an export whose storage did not
+		// mount. It is a boot-time assertion and says nothing after that.
+		SentinelLocation string `json:"sentinelLocation"`
+
+		// HealthProbeObject names an object the origin may read repeatedly,
+		// forever, to prove this export's storage is still reachable.
+		//
+		// Deliberately separate from SentinelLocation despite the surface
+		// similarity: different lifetime, different failure semantics, and an
+		// administrator may reasonably want one without the other. A read-only
+		// export needs this to be probed at all, since the origin cannot write an
+		// object of its own to read back. Writable exports do not need it -- their
+		// probe mints and removes its own object under ProbeReservedPrefix.
+		HealthProbeObject string `json:"healthProbeObject,omitempty"`
 
 		// AuthorizationTemplates are per-export authorization rules.
 		// When set, these override the global Issuer.AuthorizationTemplates

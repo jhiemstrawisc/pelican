@@ -85,7 +85,7 @@ var dateSubdirPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 var directorTestFilePattern = regexp.MustCompile(
 	`^` + regexp.QuoteMeta(server_utils.MonitoringBaseNs) +
 		`/` + regexp.QuoteMeta(server_utils.DirectorTestDir) +
-		`/[^/[:cntrl:]]+/\d{4}-\d{2}-\d{2}/` + regexp.QuoteMeta(server_utils.DirectorTest.String()) +
+		`/[^/[:cntrl:]]+/\d{4}-\d{2}-\d{2}/` + regexp.QuoteMeta(server_structs.DirectorTestSuite.String()) +
 		`-[^/[:cntrl:]]+$`)
 
 // removeTestFile disposes of a single director-test file.
@@ -208,7 +208,7 @@ func cleanupDirectorTestFiles(ctx context.Context, dirTestPath string) error {
 			if err := cleanupDirectorIDSubtree(ctx, idDirPath, todayStr); err != nil {
 				log.WithError(err).Warnf("Failed to clean up director subtree: %s", idDirPath)
 			}
-		} else if strings.HasPrefix(entry.Name(), server_utils.DirectorTest.String()) {
+		} else if strings.HasPrefix(entry.Name(), server_structs.DirectorTestSuite.String()) {
 			// Collect legacy flat files (director-test-* files sitting directly in directorTest/)
 			legacyFiles = append(legacyFiles, entry)
 		}

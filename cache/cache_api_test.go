@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pelicanplatform/pelican/param"
+	"github.com/pelicanplatform/pelican/server_structs"
 	"github.com/pelicanplatform/pelican/server_utils"
 )
 
@@ -86,8 +87,8 @@ func TestDirectorTestFilePattern(t *testing.T) {
 	// "/pelican/monitoring/directorTest/<director-id>/<date>"
 	prefix := base + "/director-1.example.com/2026-06-16"
 	// validTxt / validCinfo are the two real filenames the cache writes.
-	validTxt := prefix + "/" + server_utils.DirectorTest.String() + "-abc123.txt"
-	validCinfo := prefix + "/" + server_utils.DirectorTest.String() + "-abc123.txt.cinfo"
+	validTxt := prefix + "/" + server_structs.DirectorTestSuite.String() + "-abc123.txt"
+	validCinfo := prefix + "/" + server_structs.DirectorTestSuite.String() + "-abc123.txt.cinfo"
 
 	tests := []struct {
 		name string
@@ -97,37 +98,37 @@ func TestDirectorTestFilePattern(t *testing.T) {
 		// --- Paths that MUST be accepted ---
 		{"valid txt file", validTxt, true},
 		{"valid cinfo file", validCinfo, true},
-		{"director-id with dots and dashes", base + "/director-1.example.com/2026-06-16/" + server_utils.DirectorTest.String() + "-x", true},
-		{"director-id with port-like segment", base + "/director-1.example.com:8443/2026-06-16/" + server_utils.DirectorTest.String() + "-x.txt", true},
-		{"suffix with extra dashes and dots", prefix + "/" + server_utils.DirectorTest.String() + "-2026-06-16T00.00.00Z.cinfo", true},
+		{"director-id with dots and dashes", base + "/director-1.example.com/2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x", true},
+		{"director-id with port-like segment", base + "/director-1.example.com:8443/2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x.txt", true},
+		{"suffix with extra dashes and dots", prefix + "/" + server_structs.DirectorTestSuite.String() + "-2026-06-16T00.00.00Z.cinfo", true},
 
 		// --- Path traversal: the headline security cases ---
-		{"traversal in director-id", base + "/../../etc/passwd/2026-06-16/" + server_utils.DirectorTest.String() + "-x", false},
-		{"traversal via dotdot filename", prefix + "/" + server_utils.DirectorTest.String() + "-/../../../etc/passwd", false},
+		{"traversal in director-id", base + "/../../etc/passwd/2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x", false},
+		{"traversal via dotdot filename", prefix + "/" + server_structs.DirectorTestSuite.String() + "-/../../../etc/passwd", false},
 		{"absolute escape after prefix", server_utils.MonitoringBaseNs + "/../../../../etc/passwd", false},
-		{"dotdot as date segment", base + "/director-1.example.com/../" + server_utils.DirectorTest.String() + "-x", false},
+		{"dotdot as date segment", base + "/director-1.example.com/../" + server_structs.DirectorTestSuite.String() + "-x", false},
 
 		// --- Structural violations ---
 		{"empty path", "", false},
 		{"prefix only, no filename", prefix, false},
 		{"prefix with trailing slash", prefix + "/", false},
-		{"missing director-id segment", base + "/2026-06-16/" + server_utils.DirectorTest.String() + "-x", false},
-		{"missing date segment", base + "/director-1.example.com/" + server_utils.DirectorTest.String() + "-x", false},
-		{"empty director-id (double slash)", base + "//2026-06-16/" + server_utils.DirectorTest.String() + "-x", false},
-		{"double slash before filename", prefix + "//" + server_utils.DirectorTest.String() + "-x", false},
-		{"extra nested directory", prefix + "/extra/" + server_utils.DirectorTest.String() + "-x", false},
+		{"missing director-id segment", base + "/2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x", false},
+		{"missing date segment", base + "/director-1.example.com/" + server_structs.DirectorTestSuite.String() + "-x", false},
+		{"empty director-id (double slash)", base + "//2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x", false},
+		{"double slash before filename", prefix + "//" + server_structs.DirectorTestSuite.String() + "-x", false},
+		{"extra nested directory", prefix + "/extra/" + server_structs.DirectorTestSuite.String() + "-x", false},
 
 		// --- Date-segment validation ---
-		{"date wrong format (no dashes)", base + "/director-1.example.com/20260616/" + server_utils.DirectorTest.String() + "-x", false},
-		{"date too short", base + "/director-1.example.com/2026-6-16/" + server_utils.DirectorTest.String() + "-x", false},
-		{"date with trailing junk", base + "/director-1.example.com/2026-06-16x/" + server_utils.DirectorTest.String() + "-x", false},
+		{"date wrong format (no dashes)", base + "/director-1.example.com/20260616/" + server_structs.DirectorTestSuite.String() + "-x", false},
+		{"date too short", base + "/director-1.example.com/2026-6-16/" + server_structs.DirectorTestSuite.String() + "-x", false},
+		{"date with trailing junk", base + "/director-1.example.com/2026-06-16x/" + server_structs.DirectorTestSuite.String() + "-x", false},
 
 		// --- Filename / prefix violations ---
 		{"wrong filename prefix", prefix + "/self-test-x", false},
-		{"missing dash after director-test", prefix + "/" + server_utils.DirectorTest.String() + "x", false},
-		{"empty suffix after dash", prefix + "/" + server_utils.DirectorTest.String() + "-", false},
-		{"wrong base namespace", "/pelican/evil/directorTest/director-1.example.com/2026-06-16/" + server_utils.DirectorTest.String() + "-x", false},
-		{"wrong subdirectory", server_utils.MonitoringBaseNs + "/selfTest/director-1.example.com/2026-06-16/" + server_utils.DirectorTest.String() + "-x", false},
+		{"missing dash after director-test", prefix + "/" + server_structs.DirectorTestSuite.String() + "x", false},
+		{"empty suffix after dash", prefix + "/" + server_structs.DirectorTestSuite.String() + "-", false},
+		{"wrong base namespace", "/pelican/evil/directorTest/director-1.example.com/2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x", false},
+		{"wrong subdirectory", server_utils.MonitoringBaseNs + "/selfTest/director-1.example.com/2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x", false},
 		{"not anchored at start", "junk" + validTxt, false},
 		{"leading dir before base", "/var/lib" + validTxt, false},
 
@@ -138,10 +139,10 @@ func TestDirectorTestFilePattern(t *testing.T) {
 		{"trailing newline", validTxt + "\n", false},
 		{"trailing carriage return", validTxt + "\r", false},
 		{"trailing NUL", validTxt + "\x00", false},
-		{"newline embedded in suffix", prefix + "/" + server_utils.DirectorTest.String() + "-foo\nbar", false},
-		{"carriage return embedded in suffix", prefix + "/" + server_utils.DirectorTest.String() + "-foo\rbar", false},
-		{"tab embedded in suffix", prefix + "/" + server_utils.DirectorTest.String() + "-foo\tbar", false},
-		{"newline embedded in director-id", base + "/director-1.ex\nample.com/2026-06-16/" + server_utils.DirectorTest.String() + "-x", false},
+		{"newline embedded in suffix", prefix + "/" + server_structs.DirectorTestSuite.String() + "-foo\nbar", false},
+		{"carriage return embedded in suffix", prefix + "/" + server_structs.DirectorTestSuite.String() + "-foo\rbar", false},
+		{"tab embedded in suffix", prefix + "/" + server_structs.DirectorTestSuite.String() + "-foo\tbar", false},
+		{"newline embedded in director-id", base + "/director-1.ex\nample.com/2026-06-16/" + server_structs.DirectorTestSuite.String() + "-x", false},
 		{"newline then traversal", validTxt + "\n/etc/passwd", false},
 		{"leading newline", "\n" + validTxt, false},
 	}

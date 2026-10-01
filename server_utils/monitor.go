@@ -130,14 +130,12 @@ func HandleDirectorTestResponse(ctx *gin.Context, nChan chan bool) {
 	updateTime := time.Unix(dt.Timestamp, 0)
 	// We will let the timer go timeout if director didn't send a valid json request
 	notifyNewDirectorResponse(ctx, nChan)
-	if dt.Status == "ok" {
-		metrics.SetComponentHealthStatus(metrics.OriginCache_Director, metrics.StatusOK, fmt.Sprintf("Director object transfer test succeeded at: %s", updateTime.Format("2006-01-02 15:04:05")))
-		ctx.JSON(http.StatusOK, server_structs.SimpleApiResp{
-			Status: server_structs.RespOK,
-			Msg:    "Success",
-		})
-	} else if dt.Status == "error" {
-		metrics.SetComponentHealthStatus(metrics.OriginCache_Director, metrics.StatusCritical, fmt.Sprint("Director object transfer test failed: ", dt.Message))
+	if dt.Status == "ok" || dt.Status == "error" {
+		status, msg := InterpretDirectorTestResult(dt, updateTime)
+		metrics.SetComponentHealthStatus(metrics.OriginCache_Director, status, msg)
+		if dt.Report != nil {
+			RecordDirectorTestReport(*dt.Report)
+		}
 		ctx.JSON(http.StatusOK, server_structs.SimpleApiResp{
 			Status: server_structs.RespOK,
 			Msg:    "Success",
@@ -149,4 +147,28 @@ func HandleDirectorTestResponse(ctx *gin.Context, nChan chan bool) {
 			Msg:    fmt.Sprintf("Invalid director test response status: %s", dt.Status),
 		})
 	}
+}
+
+// InterpretDirectorTestResult turns a Director's verdict about this server into
+// a component health status and message.
+//
+// Extracted from the handler so the decision can be tested without standing up
+// token verification -- the decision is the part with edge cases, and the token
+// path is exercised elsewhere.
+//
+// Both directions now carry the reason a test failed, and this is the receiving
+// end of the Director's half: when a report is present it names the step that
+// broke, the binding being probed, a machine-readable reason, and what the
+// Director could not cover. dt.Message is the same information flattened into
+// prose, and is all that Directors predating the report field send -- so it
+// remains the fallback rather than being dropped.
+func InterpretDirectorTestResult(dt server_structs.DirectorTestResult, updateTime time.Time) (metrics.HealthStatusEnum, string) {
+	if dt.Report != nil {
+		return SummarizeReport(*dt.Report)
+	}
+	if dt.Status == "ok" {
+		return metrics.StatusOK, fmt.Sprintf("Director object transfer test succeeded at: %s",
+			updateTime.Format("2006-01-02 15:04:05"))
+	}
+	return metrics.StatusCritical, fmt.Sprint("Director object transfer test failed: ", dt.Message)
 }

@@ -116,7 +116,7 @@ func TestDirectorCacheHealthTest(t *testing.T) {
 	// it'll turn around and ask the director for the file, exactly as it would
 	// if the cache's own self-test utility requested the file.
 	cachePath, err := url.JoinPath(server_utils.MonitoringBaseNs, "directorTest",
-		server_utils.DirectorTest.String()+"-2006-01-02T15:04:10Z.txt")
+		server_structs.DirectorTestSuite.String()+"-2006-01-02T15:04:10Z.txt")
 	require.NoError(t, err, "Failed to join path")
 
 	cacheUrl.Path = cachePath
