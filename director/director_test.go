@@ -873,7 +873,13 @@ func TestDirectorRegistration(t *testing.T) {
 
 		getAd := get.Value()
 		assert.Equal(t, server_structs.OriginStorageS3, getAd.StorageType)
-		assert.True(t, getAd.DisableDirectorTest)
+		// Storage type no longer decides testability. An S3 origin that asks to be
+		// director-tested is director-tested; what it is *sent* follows from the
+		// capabilities it advertises, so a read-only one simply receives no write.
+		// Forcing this on is what left the AWS public-data origins permanently
+		// critical -- see https://github.com/PelicanPlatform/pelican/issues/2713.
+		assert.False(t, getAd.DisableDirectorTest,
+			"a non-POSIX origin that enabled director tests must not have them silently disabled")
 		teardown()
 	})
 

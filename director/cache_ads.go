@@ -179,10 +179,19 @@ func populateEWMAStatusWeight(newSAd, oldSAd *server_structs.ServerAd) {
 	}
 
 	// Start building pieces from the server ads to apply an EWMA filter
-	// to the server's status weight
+	// to the server's status weight.
+	//
+	// The status fed in here fuses the Director's own probe result with the
+	// server's self-report (see directorView). It used to be the self-report
+	// alone, under a local named ioStatus -- a max-of-everything health word read
+	// as though it were a load signal, and one the Director could only learn by
+	// asking the server to repeat the Director's own measurement back to it.
 	var statusWeight float64
-	ioStatus := metrics.ParseHealthStatus(newSAd.Status)
-	xt := getRawStatusWeight(ioStatus)
+	observedStatus := directorView(newSAd.URL.String(), newSAd.Status)
+	// How healthy the server looks, discounted by how much of it we can actually
+	// see. Without the second factor, turning probes off is a free way to look
+	// exactly as good as a server that has been verified.
+	xt := getRawStatusWeight(observedStatus) * uncertaintyDiscount(newSAd)
 	t := time.Now()
 
 	// If there is no existing ad, the weight is just the current status
@@ -377,8 +386,38 @@ func recordAd(ctx context.Context, sAd server_structs.ServerAd, namespaceAds *[]
 	}
 
 	if ad.DisableDirectorTest {
-		log.Debugf("%s server %s at %s has DisableDirectorTest set. Skip health test for this server.", ad.Type, ad.Name, ad.URL.String())
-		return
+		// Drop any result left over from when probes were enabled.
+		//
+		// The admin UI only reports "Health Test Disabled" when no healthTestUtils
+		// entry exists, and nothing used to remove one: this branch returned
+		// before touching the map. A server that failed a probe and then had
+		// probes turned off therefore kept its stale "Error" and stayed red
+		// forever -- the behavior reported in #3095, which no display-level fix
+		// would have addressed.
+		func() {
+			healthTestUtilsMutex.Lock()
+			defer healthTestUtilsMutex.Unlock()
+			if existing, ok := healthTestUtils[ad.URL.String()]; ok {
+				if existing != nil && existing.Cancel != nil {
+					existing.Cancel()
+				}
+				delete(healthTestUtils, ad.URL.String())
+			}
+		}()
+
+		knob := param.Origin_DirectorTest.GetName()
+		if ad.Type == server_structs.CacheType.String() {
+			knob = param.Cache_DirectorTest.GetName()
+		}
+		// Name the config knob rather than the ad field: an administrator reading
+		// the old line went looking for "DisableDirectorTest" and found no such
+		// parameter, because the ad field is the negation of the knob.
+		log.Debugf("%s server %s at %s has %s set to false; skipping health tests. "+
+			"Its director test status will show as %q rather than as a passing test.",
+			ad.Type, ad.Name, ad.URL.String(), knob, HealthStatusDisabled)
+		// Return the ad we computed. A bare return here handed back a
+		// zero-valued advertisement, unlike the adjacent topology branch.
+		return sAd
 	}
 
 	// Prepare and launch the director file transfer tests to the origins/caches if it's not from the topology AND it's not already been registered

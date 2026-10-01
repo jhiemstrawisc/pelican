@@ -65,14 +65,19 @@ type (
 		// bringing them into a single concept would be a breaking change.
 		// HealthStatus is for the director-->XRootDServer health test, while
 		// ServerStatus is for the Origin/Cache to report other aspects of its health
-		HealthStatus           HealthTestStatus `json:"healthStatus"`
-		ServerStatus           string           `json:"serverStatus"`
-		IOLoad                 float64          `json:"ioLoad"`
-		StatusWeight           float64          `json:"statusWeight"`           // The current EWMA-derived weight for this server's status, populated by the Director
-		StatusWeightLastUpdate int64            `json:"statusWeightLastUpdate"` // The last time the status weight was updated, in epoch seconds
-		RegistryPrefix         string           `json:"registryPrefix"`
-		NamespacePrefixes      []string         `json:"namespacePrefixes"`
-		Version                string           `json:"version"`
+		HealthStatus HealthTestStatus `json:"healthStatus"`
+		ServerStatus string           `json:"serverStatus"`
+		// HealthDetail carries the reason behind the two fields above. It appears
+		// on the list endpoint as well as the detail one because the admin UI's
+		// server list is where an operator first sees something is wrong, and
+		// making them click through to learn why is the gap this replaces.
+		HealthDetail           *serverHealthDetail `json:"healthDetail,omitempty"`
+		IOLoad                 float64             `json:"ioLoad"`
+		StatusWeight           float64             `json:"statusWeight"`           // The current EWMA-derived weight for this server's status, populated by the Director
+		StatusWeightLastUpdate int64               `json:"statusWeightLastUpdate"` // The last time the status weight was updated, in epoch seconds
+		RegistryPrefix         string              `json:"registryPrefix"`
+		NamespacePrefixes      []string            `json:"namespacePrefixes"`
+		Version                string              `json:"version"`
 	}
 
 	// A response struct for a server Ad that provides a detailed view into the servers data
@@ -88,26 +93,55 @@ type (
 		// AuthURL is Deprecated. For Pelican severs, URL is used as the base URL for object access.
 		// This is to maintain compatibility with the topology servers, where it uses AuthURL for
 		// accessing protected objects and URL for public objects.
-		AuthURL                string                               `json:"authUrl"`
-		BrokerURL              string                               `json:"brokerUrl"`
-		URL                    string                               `json:"url"`    // This is server's XRootD URL for file transfer
-		WebURL                 string                               `json:"webUrl"` // This is server's Web interface and API
-		Type                   string                               `json:"type"`
-		Coordinate             server_structs.Coordinate            `json:"coordinate"`
-		Latitude               float64                              `json:"latitude"`
-		Longitude              float64                              `json:"longitude"`
-		Caps                   server_structs.Capabilities          `json:"capabilities"`
-		Filtered               bool                                 `json:"filtered"`
-		FilteredType           string                               `json:"filteredType"`
-		Downtimes              []server_structs.Downtime            `json:"downtimes"`
-		FromTopology           bool                                 `json:"fromTopology"`
-		HealthStatus           HealthTestStatus                     `json:"healthStatus"`
-		ServerStatus           string                               `json:"serverStatus"` // see comment in listServerResponse
+		AuthURL      string                      `json:"authUrl"`
+		BrokerURL    string                      `json:"brokerUrl"`
+		URL          string                      `json:"url"`    // This is server's XRootD URL for file transfer
+		WebURL       string                      `json:"webUrl"` // This is server's Web interface and API
+		Type         string                      `json:"type"`
+		Coordinate   server_structs.Coordinate   `json:"coordinate"`
+		Latitude     float64                     `json:"latitude"`
+		Longitude    float64                     `json:"longitude"`
+		Caps         server_structs.Capabilities `json:"capabilities"`
+		Filtered     bool                        `json:"filtered"`
+		FilteredType string                      `json:"filteredType"`
+		Downtimes    []server_structs.Downtime   `json:"downtimes"`
+		FromTopology bool                        `json:"fromTopology"`
+		HealthStatus HealthTestStatus            `json:"healthStatus"`
+		ServerStatus string                      `json:"serverStatus"` // see comment in listServerResponse
+		// HealthDetail is what healthStatus and serverStatus could never say: why
+		// a server is in the state it is in, and which parts of its data path
+		// anyone actually checked. Both older fields stay populated for
+		// compatibility and are deprecated in the swagger spec.
+		HealthDetail           *serverHealthDetail                  `json:"healthDetail,omitempty"`
 		IOLoad                 float64                              `json:"ioLoad"`
 		StatusWeight           float64                              `json:"statusWeight"`           // The current EWMA-derived weight for this server's status, populated by the Director
 		StatusWeightLastUpdate int64                                `json:"statusWeightLastUpdate"` // The last time the status weight was updated, in epoch seconds
 		Namespaces             []server_structs.NamespaceAdResponse `json:"namespaces"`
 		Version                string                               `json:"version"`
+	}
+
+	// serverHealthDetail is the fused view of a server's health: what this
+	// Director measured itself, and what the server said about itself.
+	//
+	// Keeping the two apart matters. The Director's own probe is first-hand
+	// evidence; the self-report is the server's word. Merging them into one
+	// number is how the Director came to act on its own measurement only after
+	// the observed server had echoed it back.
+	serverHealthDetail struct {
+		// DirectorProbe is this Director's most recent probe of the server.
+		DirectorProbe *server_structs.TestReport `json:"directorProbe,omitempty"`
+		// DirectorProbeAt is when that probe ran, in epoch seconds.
+		DirectorProbeAt int64 `json:"directorProbeAt,omitempty"`
+		// Reported is what the server most recently advertised about itself.
+		Reported *server_structs.ServerHealth `json:"reported,omitempty"`
+		// Uncovered names the parts of a client's path that neither observer
+		// reached. A server can be green on every field above and still have
+		// entries here; that combination is precisely the gray-failure surface.
+		Uncovered []server_structs.Edge `json:"uncovered,omitempty"`
+		// DetailWithheld records that the server's administrator opted out of
+		// sharing diagnostic detail via Origin.ShareHealthDetails, so a reader
+		// knows the difference between "nothing was wrong" and "we were not told".
+		DetailWithheld bool `json:"detailWithheld,omitempty"`
 	}
 
 	statRequest struct {
@@ -204,10 +238,26 @@ func namespaceAdToMappedResponse(ns *server_structs.NamespaceAd) server_structs.
 
 // Convert Advertisement to serverResponse
 func advertisementToServerResponse(ad *server_structs.Advertisement) serverResponse {
+	// NOTE: the caller holds healthTestUtilsMutex, so this reads the util
+	// directly rather than going through directorView or uncertaintyDiscount,
+	// which take the lock themselves.
 	healthStatus := HealthStatusUnknown
+	detail := &serverHealthDetail{}
+
+	// An edge is only genuinely uncovered if *neither* observer reached it. The
+	// Director probes the synthetic monitoring namespace, so an origin's real
+	// exports are only ever covered by the origin's own self-test; taking either
+	// report alone would overstate the gap.
+	var uncoveredPerObserver [][]server_structs.Edge
+
 	healthUtil, ok := healthTestUtils[ad.URL.String()]
 	if ok {
 		healthStatus = healthUtil.Status
+		if healthUtil.Probe != nil {
+			detail.DirectorProbe = healthUtil.Probe
+			detail.DirectorProbeAt = healthUtil.ProbeAt.Unix()
+			uncoveredPerObserver = append(uncoveredPerObserver, healthUtil.Probe.Uncovered)
+		}
 	} else {
 		if ad.DisableDirectorTest {
 			healthStatus = HealthStatusDisabled
@@ -216,6 +266,22 @@ func advertisementToServerResponse(ad *server_structs.Advertisement) serverRespo
 				log.Debugf("advertisementToServerResponse: healthTestUtils not found for server at %s", ad.URL.String())
 			}
 		}
+	}
+
+	if ad.Health != nil {
+		detail.Reported = ad.Health
+		detail.DetailWithheld = ad.Health.Redacted
+		if ad.Health.SelfTest != nil {
+			uncoveredPerObserver = append(uncoveredPerObserver, ad.Health.SelfTest.Uncovered)
+		}
+	}
+	detail.Uncovered = intersectEdges(uncoveredPerObserver)
+
+	// Omit the field entirely rather than emitting an empty object. A server that
+	// has told us nothing and that we have not yet probed has no health detail,
+	// which is different from having health detail that happens to be blank.
+	if detail.DirectorProbe == nil && detail.Reported == nil && len(detail.Uncovered) == 0 {
+		detail = nil
 	}
 	filtered, ft := checkFilter(ad.Name)
 	res := serverResponse{
@@ -238,8 +304,13 @@ func advertisementToServerResponse(ad *server_structs.Advertisement) serverRespo
 		FromTopology:        ad.FromTopology,
 		HealthStatus:        healthStatus,
 		ServerStatus:        ad.Status,
+		HealthDetail:        detail,
 		IOLoad:              ad.GetIOLoad(),
-		Version:             ad.Version,
+		// These were declared on both response structs and never assigned, so
+		// they always serialized as 0 no matter what the sorting logic computed.
+		StatusWeight:           ad.StatusWeight,
+		StatusWeightLastUpdate: ad.StatusWeightLastUpdate,
+		Version:                ad.Version,
 	}
 	for _, ns := range ad.NamespaceAds {
 		nsRes := namespaceAdToResponse(&ns)
@@ -251,27 +322,30 @@ func advertisementToServerResponse(ad *server_structs.Advertisement) serverRespo
 // Convert serverResponse to a listServerResponse
 func serverResponseToListServerResponse(res serverResponse) listServerResponse {
 	listRes := listServerResponse{
-		Name:                res.Name,
-		ServerID:            res.ServerID,
-		RegistryPrefix:      res.RegistryPrefix,
-		StorageType:         res.StorageType,
-		DisableDirectorTest: res.DisableDirectorTest,
-		BrokerURL:           res.BrokerURL,
-		AuthURL:             res.AuthURL,
-		URL:                 res.URL,
-		WebURL:              res.WebURL,
-		Type:                res.Type,
-		Latitude:            res.Latitude,
-		Longitude:           res.Longitude,
-		Caps:                res.Caps,
-		Filtered:            res.Filtered,
-		FilteredType:        res.FilteredType,
-		Downtimes:           res.Downtimes,
-		FromTopology:        res.FromTopology,
-		HealthStatus:        res.HealthStatus,
-		ServerStatus:        res.ServerStatus,
-		IOLoad:              res.IOLoad,
-		Version:             res.Version,
+		Name:                   res.Name,
+		ServerID:               res.ServerID,
+		RegistryPrefix:         res.RegistryPrefix,
+		StorageType:            res.StorageType,
+		DisableDirectorTest:    res.DisableDirectorTest,
+		BrokerURL:              res.BrokerURL,
+		AuthURL:                res.AuthURL,
+		URL:                    res.URL,
+		WebURL:                 res.WebURL,
+		Type:                   res.Type,
+		Latitude:               res.Latitude,
+		Longitude:              res.Longitude,
+		Caps:                   res.Caps,
+		Filtered:               res.Filtered,
+		FilteredType:           res.FilteredType,
+		Downtimes:              res.Downtimes,
+		FromTopology:           res.FromTopology,
+		HealthStatus:           res.HealthStatus,
+		ServerStatus:           res.ServerStatus,
+		HealthDetail:           res.HealthDetail,
+		IOLoad:                 res.IOLoad,
+		StatusWeight:           res.StatusWeight,
+		StatusWeightLastUpdate: res.StatusWeightLastUpdate,
+		Version:                res.Version,
 	}
 	for _, ns := range res.Namespaces {
 		listRes.NamespacePrefixes = append(listRes.NamespacePrefixes, ns.Path)
@@ -308,7 +382,12 @@ func getServerHandler(ctx *gin.Context) {
 		})
 		return
 	}
+	// advertisementToServerResponse reads healthTestUtils directly and documents
+	// that its caller holds the lock. listServers took it; this did not.
+	healthTestUtilsMutex.RLock()
 	serverResponse := advertisementToServerResponse(server)
+	healthTestUtilsMutex.RUnlock()
+
 	ctx.JSON(http.StatusOK, serverResponse)
 }
 

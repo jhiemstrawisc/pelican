@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -43,7 +44,7 @@ import (
 )
 
 // Report the health status of test file transfer to storage server
-func reportStatusToServer(ctx context.Context, serverWebUrl string, status string, message string, serverType string, fallback bool) error {
+func reportStatusToServer(ctx context.Context, serverWebUrl string, status string, message string, serverType string, fallback bool, report *server_structs.TestReport) error {
 	fedInfo, err := config.GetFederation(ctx)
 	if err != nil {
 		return err
@@ -84,6 +85,7 @@ func reportStatusToServer(ctx context.Context, serverWebUrl string, status strin
 		Status:    status,
 		Message:   message,
 		Timestamp: time.Now().Unix(),
+		Report:    report,
 	}
 
 	jsonData, err := json.Marshal(dt)
@@ -120,6 +122,77 @@ func reportStatusToServer(ctx context.Context, serverWebUrl string, status strin
 	}
 
 	return nil
+}
+
+// serverTypeOf converts an ad's type string back into the bitmask form used for
+// coverage lookups.
+func serverTypeOf(adType string) server_structs.ServerType {
+	switch adType {
+	case server_structs.OriginType.String():
+		return server_structs.OriginType
+	case server_structs.CacheType.String():
+		return server_structs.CacheType
+	default:
+		return server_structs.ServerType(0)
+	}
+}
+
+// originTestPlan builds the Director's probe of an origin: write an object into
+// the monitoring namespace, read it back, and delete it.
+//
+// The binding it records is the monitoring namespace, not any namespace a client
+// reads. On a POSIX origin that namespace resolves under the run location rather
+// than the administrator's data volume, so this probe passing does not establish
+// that the exported storage is reachable.
+func originTestPlan(ad server_structs.ServerAd) server_utils.ProbePlan {
+	originUrl := ad.URL.String()
+
+	plan := server_utils.ProbePlan{
+		Suite: server_structs.DirectorTestSuite,
+		Binding: server_structs.BindingRef{
+			Namespace:   server_utils.MonitoringBaseNs,
+			StorageKind: string(ad.StorageType),
+			Synthetic:   true,
+		},
+		BaseURL: originUrl,
+		Prefix:  path.Join(server_utils.MonitoringBaseNs, server_utils.DirectorTestDir),
+		Body:    server_utils.DirectorTestBody,
+		// An empty issuer means the federation's discovery endpoint, with the
+		// Director's own URL as a fallback for origins that predate it.
+		Auth: server_utils.ProbeAuth{
+			Audiences: []string{originUrl},
+			RawScope:  "storage.read:/ storage.modify:/",
+		},
+		Expected: server_structs.ExpectedEdges(server_structs.OriginType),
+		// The steps come from what the origin says it can do, not from what
+		// backend it runs. An origin advertising no write capability is sent no
+		// PUT: doing so guaranteed a failure and pinned the server critical
+		// forever, which is what the AWS public-data origins in the OSDF have
+		// been reporting.
+		Steps: server_utils.OriginProbeSteps(ad.Caps),
+	}
+
+	if len(plan.Steps) == 0 {
+		log.Debugf(
+			"Origin %s advertises no write capability, so the director test has no probe to run "+
+				"against %s; reporting it as not applicable rather than failing a write it never claimed to support",
+			ad.Name, server_utils.MonitoringBaseNs)
+	}
+
+	return plan
+}
+
+// directorTestPlan selects the probe appropriate to the kind of server being tested.
+func directorTestPlan(ad server_structs.ServerAd) (server_utils.ProbePlan, error) {
+	switch ad.Type {
+	case server_structs.OriginType.String():
+		return originTestPlan(ad), nil
+	case server_structs.CacheType.String():
+		return cacheTestPlan(ad.URL)
+	default:
+		return server_utils.ProbePlan{}, errors.Errorf(
+			"cannot health test server %s: unrecognized server type %q", ad.Name, ad.Type)
+	}
 }
 
 // LaunchPeriodicDirectorTest runs periodic test file transfers against an origin or cache to ensure
@@ -190,24 +263,42 @@ func LaunchPeriodicDirectorTest(ctx context.Context, serverUrlStr string) {
 		}
 
 		log.Debug(fmt.Sprintf("Starting a director test cycle for %s server %s at %s", currentServerAd.Type, currentServerAd.Name, currentServerAd.URL.String()))
-		testSucceeded := true
-		var testErr error
-		var currentTestFilePath string
-		if currentServerAd.Type == server_structs.OriginType.String() {
-			fileTests := server_utils.TestFileTransferImpl{}
-			testSucceeded, testErr = fileTests.RunTests(ctx, currentServerAd.URL.String(), currentServerAd.URL.String(), "", server_utils.DirectorTest)
-		} else if currentServerAd.Type == server_structs.CacheType.String() {
-			currentTestFilePath, testErr = runCacheTest(ctx, currentServerAd.URL)
+
+		// Build the probe for whichever kind of server this is. An unrecognized
+		// type yields no plan and is reported as such: the previous code left its
+		// success flag initialized to true in that case and reported "ok" without
+		// having run any test at all.
+		plan, planErr := directorTestPlan(currentServerAd)
+		var run server_utils.ProbeRun
+		if planErr != nil {
+			run.Report = server_structs.NewTestReport(
+				server_structs.DirectorTestSuite,
+				server_structs.ExpectedEdges(serverTypeOf(currentServerAd.Type)),
+				[]server_structs.TestResult{{
+					Outcome: server_structs.TestOutcomeFail,
+					Reason:  server_structs.ReasonInternal,
+					Detail:  planErr.Error(),
+					At:      time.Now().Unix(),
+				}})
+		} else {
+			run = plan.Run(ctx)
 		}
 
-		// Compose the result of this Director-test to report to the server
-		var reportStatus, reportMessage string // status (result of the Director-test) and message to report back to the server
-		var healthStatus HealthTestStatus
-		if testSucceeded && testErr == nil {
+		reportStatus := "error"
+		healthStatus := HealthStatusError
+		if !run.Report.Outcome.IsFailure() {
 			reportStatus = "ok"
-			reportMessage = "Director test cycle succeeded at " + time.Now().Format(time.RFC3339)
 			healthStatus = HealthStatusOK
-			log.Debugf("Director file transfer test cycle succeeded at %s for %s server with URL at %s", time.Now().Format(time.RFC3339), currentServerAd.Type, currentServerAd.URL.String())
+
+			// Nothing ran, so the Director has no evidence either way. Reporting
+			// "ok" on the wire keeps the server out of the red -- it has done
+			// nothing wrong -- but the Director's own view must say "unknown"
+			// rather than claim a pass it never observed.
+			if run.Report.Outcome == server_structs.TestOutcomeSkip {
+				healthStatus = HealthStatusUnknown
+			}
+			log.Debugf("Director file transfer test cycle succeeded at %s for %s server with URL at %s",
+				time.Now().Format(time.RFC3339), currentServerAd.Type, currentServerAd.URL.String())
 
 			// On a successful cache test, evict the test file from the previous cycle via the
 			// cache's web API, which in turn calls the xrdhttp-pelican evict API locally.
@@ -217,23 +308,31 @@ func LaunchPeriodicDirectorTest(ctx context.Context, serverUrlStr string) {
 			if currentServerAd.Type == server_structs.CacheType.String() && prevCacheTestFilePath != "" {
 				evictCacheTestFile(ctx, currentServerAd.WebURL.String(), prevCacheTestFilePath)
 			}
-			prevCacheTestFilePath = currentTestFilePath
+			prevCacheTestFilePath = run.ObjectPath
 		} else {
-			reportStatus = "error"
-			reportMessage = "Director file transfer test cycle failed for server: " + currentServerAd.URL.String()
-			if testErr != nil {
-				reportMessage += " " + testErr.Error()
-			}
-			healthStatus = HealthStatusError
-			log.Warningln("Director file transfer test cycle failed for ", currentServerAd.Type, " server: ", currentServerAd.URL.String(), " ", testErr)
+			log.Warningln("Director file transfer test cycle failed for ", currentServerAd.Type,
+				" server: ", currentServerAd.URL.String())
 		}
 
-		// Update healthTestUtils once per cycle
+		// The message now names the step that broke, the reason, and the binding
+		// it was probing, rather than only that "the test cycle failed".
+		_, reportMessage := server_utils.SummarizeReport(run.Report)
+
+		// Update healthTestUtils once per cycle.
+		//
+		// The full report is retained, not just the verdict. It is what
+		// directorView reads so routing can act on this Director's own
+		// observation, and what the admin API surfaces so a federation
+		// administrator can see why a server is failing without having to ask the
+		// server itself.
 		func() {
 			healthTestUtilsMutex.Lock()
 			defer healthTestUtilsMutex.Unlock()
 			if existingUtil, ok := healthTestUtils[currentServerAd.URL.String()]; ok {
 				existingUtil.Status = healthStatus
+				report := run.Report
+				existingUtil.Probe = &report
+				existingUtil.ProbeAt = time.Now()
 			} else {
 				log.Debugln("HealthTestUtil missing for ", currentServerAd.Type, " server: ", currentServerAd.URL.String(), " Failed to update internal status")
 			}
@@ -241,12 +340,13 @@ func LaunchPeriodicDirectorTest(ctx context.Context, serverUrlStr string) {
 
 		// Determine the metric status label based on test result
 		testStatusMetric := metrics.MetricSucceeded
-		if !testSucceeded || testErr != nil {
+		if run.Report.Outcome.IsFailure() {
 			testStatusMetric = metrics.MetricFailed
 		}
 
 		// Report the result of this Director-test back to origin/server (single call)
-		reportErr := reportStatusToServer(ctx, currentServerAd.WebURL.String(), reportStatus, reportMessage, currentServerAd.Type, false)
+		probeReport := run.Report
+		reportErr := reportStatusToServer(ctx, currentServerAd.WebURL.String(), reportStatus, reportMessage, currentServerAd.Type, false, &probeReport)
 
 		// Determine report status metric and log if reporting failed
 		reportStatusMetric := metrics.MetricSucceeded

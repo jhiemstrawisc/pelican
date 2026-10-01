@@ -3480,9 +3480,17 @@ components: ["cache"]
 name: Cache.DirectorTest
 description: |+
   A bool indicating whether the director should send file transfer tests to the cache.
+
+  Unlike an origin, a cache is penalized for turning this off. A cache joins a federation to serve
+  that federation's traffic, so a cache the director cannot measure cannot be told apart from a
+  failing one; it receives a reduced routing weight and is shown as an error in the director's web
+  UI. Leave this enabled unless you intend that trade.
+
+  Note that the advertisement carries the negation of this parameter, as `disableDirectorTest`. If
+  you are searching logs or the director API for why a cache is not being tested, that is the field
+  name you will see.
 type: bool
 default: true
-hidden: true
 components: ["cache"]
 ---
 name: Cache.EnableOIDC

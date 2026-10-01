@@ -22,12 +22,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"path"
-	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -35,58 +33,63 @@ import (
 
 	"github.com/pelicanplatform/pelican/config"
 	"github.com/pelicanplatform/pelican/param"
+	"github.com/pelicanplatform/pelican/server_structs"
 	"github.com/pelicanplatform/pelican/server_utils"
 	"github.com/pelicanplatform/pelican/token"
 	"github.com/pelicanplatform/pelican/token_scopes"
 )
 
-// Run one object transfer to a cache from the director. Since director-based cache tests require a different
-// workflow than the origin tests. We can't reuse server_utils.RunTests(), but we want to keep common
-// pieces together.
+// cacheTestPlan builds the Director's probe of a cache.
 //
-// Returns the namespace-relative test file path (e.g.
-// /pelican/monitoring/directorTest/<director-hostname>/2025-01-24/director-test-...txt)
-// so the caller can evict it from the cache after the test cycle. The per-director
-// subdirectory keeps multiple directors' test files from colliding under a shared cache.
-func runCacheTest(ctx context.Context, cacheUrl url.URL) (testFilePath string, err error) {
-	now := time.Now()
-	nowStr := now.Format(time.RFC3339)
-	dayStr := now.Format("2006-01-02")
+// The probe asks for an object the cache cannot already hold -- the name carries
+// a fresh timestamp -- so serving it forces the cache onto its miss path:
+// resolve upstream through the Director, fetch, and commit to disk. The
+// per-director subdirectory keeps several Directors sharing one cache from
+// colliding, and makes stale objects easy to sweep by day.
+//
+// What this probe does *not* reach is as important as what it does. It only
+// ever takes the miss branch, so it says nothing about serving an object that
+// is already resident; and the upstream it drives the cache to is the
+// Director's own synthetic origin, served public-read, so no federation token
+// is minted and no real origin is contacted. Those edges are listed as expected
+// and land in the report's Uncovered set.
+func cacheTestPlan(cacheUrl url.URL) (server_utils.ProbePlan, error) {
 	directorID := param.Server_Hostname.GetString()
 	if directorID == "" {
-		return "", errors.Errorf("%s is empty; cannot construct director test file path", param.Server_Hostname.GetName())
+		return server_utils.ProbePlan{}, errors.Errorf(
+			"%s is empty; cannot construct director test file path", param.Server_Hostname.GetName())
 	}
-	dirMonPath := path.Join(server_utils.MonitoringBaseNs, server_utils.DirectorTestDir)
-	testFilePath = path.Join(dirMonPath, directorID, dayStr, server_utils.DirectorTest.String()+"-"+nowStr+".txt")
-	cacheUrl = *cacheUrl.JoinPath(testFilePath)
-	client := config.GetClient()
-	req, reqErr := http.NewRequestWithContext(ctx, "GET", cacheUrl.String(), nil)
-	if reqErr != nil {
-		urlErr, ok := reqErr.(*url.Error)
-		if ok && urlErr.Err == context.Canceled {
-			// Shouldn't return error if the error is due to context being cancelled
-			return "", nil
-		}
-		return "", errors.Wrap(reqErr, "failed to create an HTTP request")
-	}
-	res, reqErr := client.Do(req)
-	if reqErr != nil {
-		return "", errors.Wrap(reqErr, "failed to send request to cache for the test file")
-	}
-	byteBody, reqErr := io.ReadAll(res.Body)
-	if reqErr != nil {
-		return "", errors.Wrap(reqErr, "failed to read response body. Response status code is "+res.Status)
-	}
-	if res.StatusCode != 200 {
-		return "", fmt.Errorf("cache responses with non-200 status code. Body is %s", string(byteBody))
-	}
-	strBody := string(byteBody)
 
-	if strings.TrimSuffix(strBody, "\n") == server_utils.DirectorTestBody {
-		return testFilePath, nil
-	} else {
-		return "", fmt.Errorf("cache response file does not match expectation. Expected:%s, Got:%s", server_utils.DirectorTestBody, strBody)
-	}
+	now := time.Now()
+	objectPath := path.Join(
+		server_utils.DirectorTestPrefix(directorID, now),
+		server_structs.DirectorTestSuite.String()+"-"+now.Format(time.RFC3339)+".txt")
+
+	return server_utils.ProbePlan{
+		Suite: server_structs.DirectorTestSuite,
+		Binding: server_structs.BindingRef{
+			Namespace:   server_utils.MonitoringBaseNs,
+			StorageKind: "cache",
+			Synthetic:   true,
+		},
+		BaseURL:    cacheUrl.String(),
+		ObjectPath: objectPath,
+		Body:       server_utils.DirectorTestBody,
+		// The monitoring namespace is public, so a client reading it presents no
+		// token. Presenting one here would test something the client path does
+		// not use.
+		Auth:     server_utils.ProbeAuth{Anonymous: true},
+		Expected: server_structs.ExpectedEdges(server_structs.CacheType),
+		Steps: []server_utils.ProbeStep{{
+			Op: server_utils.ProbeOpRead,
+			Edges: []server_structs.Edge{
+				server_structs.EdgeFront,
+				server_structs.EdgeDirectorResolve,
+				server_structs.EdgeUpstreamFetch,
+				server_structs.EdgeCacheWrite,
+			},
+		}},
+	}, nil
 }
 
 // evictCacheTestFile asks the cache to evict a previously-created director test file.

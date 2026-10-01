@@ -64,12 +64,19 @@ type (
 		Labels  map[string]string `json:"labels"`
 	}
 
-	// Util struct to keep track of director-based health tests it created
+	// Util struct to keep track of director-based health tests it created.
+	//
+	// Probe and ProbeAt hold this Director's own first-hand measurement. Keeping
+	// them is what lets the reactor act on what the Director observed rather than
+	// waiting for the observed server to echo the result back in its next
+	// advertisement -- see directorView in health.go.
 	healthTestUtil struct {
 		ErrGrp        *errgroup.Group
 		ErrGrpContext context.Context
 		Cancel        context.CancelFunc
 		Status        HealthTestStatus
+		Probe         *server_structs.TestReport
+		ProbeAt       time.Time
 	}
 	// Utility struct to keep track of the `stat` call the director made to the origin/cache servers
 	serverStatUtil struct {
@@ -121,13 +128,46 @@ func (e directorStartupErr) Error() string {
 	return fmt.Sprintf("no servers were found for the requested path '%s'; director just restarted, try again shortly", e.ns)
 }
 
+// The states a Director-run health test can be in.
+//
+// The first four all mean "the Director has no result", and the old model had one
+// representation for all of them. That is why #3095 reads as self-contradictory:
+// an origin legitimately opting out and a cache quietly hiding were the same
+// state, so any display rule that helped one hurt the other.
 const (
+	// HealthStatusDisabled means an administrator turned probes off.
 	HealthStatusDisabled HealthTestStatus = "Health Test Disabled"
-	HealthStatusUnknown  HealthTestStatus = "Unknown"
-	HealthStatusInit     HealthTestStatus = "Initializing"
-	HealthStatusOK       HealthTestStatus = "OK"
+	// HealthStatusNotApplicable means the server's advertised capabilities make
+	// the probe meaningless -- a read-only origin cannot be sent a write. This is
+	// not a reuse of Unknown, deliberately: metrics.StatusUnknown sorts as better
+	// than StatusOK, so anything mapped onto it disappears from the aggregate.
+	HealthStatusNotApplicable HealthTestStatus = "Not Applicable"
+	HealthStatusUnknown       HealthTestStatus = "Unknown"
+	HealthStatusInit          HealthTestStatus = "Initializing"
+	HealthStatusOK            HealthTestStatus = "OK"
+	// HealthStatusDegraded means the probe completed outside expected bounds.
+	HealthStatusDegraded HealthTestStatus = "Degraded"
 	HealthStatusError    HealthTestStatus = "Error"
 )
+
+// IsFailure reports whether a state should count against a server in the admin
+// UI. Only a probe that ran and failed does.
+func (h HealthTestStatus) IsFailure() bool {
+	return h == HealthStatusError
+}
+
+// IsObserved reports whether the Director actually has a measurement.
+//
+// The distinction matters for routing: a server nobody is watching must not be
+// treated as one that has been verified healthy. See uncertaintyDiscount.
+func (h HealthTestStatus) IsObserved() bool {
+	switch h {
+	case HealthStatusOK, HealthStatusDegraded, HealthStatusError:
+		return true
+	default:
+		return false
+	}
+}
 
 const (
 	// The number of caches to send in the Link header. As discussed in issue
@@ -1495,13 +1535,16 @@ func finishRegisterServeAd(engineCtx context.Context, ctx *gin.Context, ad *serv
 	if st == "" {
 		st = server_structs.OriginStoragePosix
 	}
-	// Disable director test if the server isn't POSIX-like (posix / posixv2).
-	// Remote-protocol backends (S3, HTTPS, Globus, etc.) cannot accept the
-	// probe-file write/read that the director test relies on.
-	if !st.SupportsSelfTest() && !ad.DisableDirectorTest {
-		log.Warningf("%s server '%s' with storage type '%s' enabled director test. This is not supported.", sType, ad.Name, string(st))
-		ad.DisableDirectorTest = true
-	}
+	// Storage type no longer decides whether a server is testable.
+	//
+	// This used to force DisableDirectorTest on for every non-POSIX-like backend,
+	// on the premise that remote-protocol backends cannot accept a probe write.
+	// They can; the writes are merely expensive. What actually governs is the
+	// capability the origin advertises -- an origin claiming no writes is sent no
+	// PUT (see server_utils.OriginProbeSteps) -- so a writable S3 origin is now
+	// probed like any other, and a read-only one is reported as not-applicable
+	// rather than being written to and failing forever.
+	// See https://github.com/PelicanPlatform/pelican/issues/2713.
 
 	adUrl, err := url.Parse(ad.DataURL)
 	if err != nil {
@@ -1546,6 +1589,7 @@ func finishRegisterServeAd(engineCtx context.Context, ctx *gin.Context, ad *serv
 		IOLoad:              0.0, // Explicitly set to 0. The sort algorithm takes 0.0 as unknown load
 		Downtimes:           ad.Downtimes,
 		Status:              ad.Status,
+		Health:              ad.Health,
 	}
 	// If the server declared its own geolocation via GeoLocation config, honor it.
 	if ad.Coordinate != nil {
@@ -1721,10 +1765,10 @@ func validateHealthTestRequest(fPath string) (string, error) {
 
 	// validate the timestamp in the file name
 	var tStampStr string
-	if strings.HasPrefix(fName, server_utils.DirectorTest.String()) {
-		tStampStr = strings.TrimPrefix(fName, server_utils.DirectorTest.String()+"-")
-	} else if strings.HasPrefix(fName, server_utils.ServerSelfTest.String()) {
-		tStampStr = strings.TrimPrefix(fName, server_utils.ServerSelfTest.String()+"-")
+	if strings.HasPrefix(fName, server_structs.DirectorTestSuite.String()) {
+		tStampStr = strings.TrimPrefix(fName, server_structs.DirectorTestSuite.String()+"-")
+	} else if strings.HasPrefix(fName, server_structs.SelfTestSuite.String()) {
+		tStampStr = strings.TrimPrefix(fName, server_structs.SelfTestSuite.String()+"-")
 	} else {
 		return "", fmt.Errorf("File name does not have a valid prefix: %s", fName)
 	}

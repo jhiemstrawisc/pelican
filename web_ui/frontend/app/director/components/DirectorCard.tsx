@@ -2,9 +2,9 @@
 
 import React, { useContext, useEffect, useState } from 'react';
 import { Box, IconButton, Paper, Tooltip, Typography } from '@mui/material';
-import { grey, red } from '@mui/material/colors';
+import { amber, grey, red } from '@mui/material/colors';
 import { User } from '@/index';
-import { Equalizer, Language } from '@mui/icons-material';
+import { Equalizer, HelpOutline, Language } from '@mui/icons-material';
 import { NamespaceIcon } from '@/components/Namespace/index';
 import Link from 'next/link';
 import { alertOnError } from '@/helpers/util';
@@ -15,15 +15,38 @@ import {
   AlertDispatchContext,
   AlertReducerAction,
 } from '@/components/AlertProvider';
-import serverHasError from '@/helpers/serverHasError';
+import serverHasError, {
+  serverIsUnobserved,
+  unobservedReason,
+} from '@/helpers/serverHasError';
 
 export interface DirectorCardProps {
   server: ServerGeneral;
   authenticated?: User;
 }
 
+/**
+ * Three states, not two.
+ *
+ * A server that failed a test, a server that passed one, and a server nobody
+ * measured are different things, and the last one used to render identically to
+ * the second. Giving it its own colour is what stops "we did not look" from
+ * reading as "we looked and it was fine".
+ */
+const borderColors = (server: ServerGeneral) => {
+  if (serverHasError(server)) {
+    return { rest: red[100], hover: red[400] };
+  }
+  if (serverIsUnobserved(server)) {
+    return { rest: amber[200], hover: amber[400] };
+  }
+  return { rest: 'secondary.main', hover: grey[200] };
+};
+
 export const DirectorCard = ({ server, authenticated }: DirectorCardProps) => {
   const dispatch = useContext(AlertDispatchContext);
+  const colors = borderColors(server);
+  const unverified = unobservedReason(server);
 
   const [dropdownOpen, setDropdownOpen] = useState<boolean>(false);
   const [detailedServer, setDetailedServer] = useState<
@@ -50,9 +73,9 @@ export const DirectorCard = ({ server, authenticated }: DirectorCardProps) => {
             borderRadius: '4px',
             transition: 'background-color 0.3s',
             '&:hover': {
-              borderColor: serverHasError(server) ? red[400] : grey[200],
+              borderColor: colors.hover,
             },
-            borderColor: serverHasError(server) ? red[100] : 'secondary.main',
+            borderColor: colors.rest,
             p: 1,
           }}
           onClick={async () => {
@@ -68,6 +91,20 @@ export const DirectorCard = ({ server, authenticated }: DirectorCardProps) => {
               {server.name}
               {server?.version && <> &#x2022; {server.version}</>}
             </Typography>
+            {unverified && (
+              <Tooltip title={unverified} placement={'right'}>
+                <Box
+                  sx={{ display: 'flex', alignItems: 'center', ml: 1 }}
+                  aria-label={'Health unverified'}
+                >
+                  <HelpOutline
+                    fontSize={'small'}
+                    sx={{ color: amber[800] }}
+                    titleAccess={'Health unverified'}
+                  />
+                </Box>
+              </Tooltip>
+            )}
           </Box>
           <Box display={'flex'} flexDirection={'row'}>
             <Box my={'auto'} display={'flex'}>

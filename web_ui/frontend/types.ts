@@ -47,7 +47,9 @@ interface ServerBase {
   filtered: boolean;
   filteredType: string;
   fromTopology: boolean;
+  /** @deprecated prefer healthDetail; this cannot express why a test failed. */
   healthStatus: string;
+  /** @deprecated prefer healthDetail; this is an aggregate with no reason attached. */
   serverStatus:
     | 'shutting down'
     | 'critical'
@@ -55,7 +57,78 @@ interface ServerBase {
     | 'warning'
     | 'ok'
     | 'unknown';
+  healthDetail?: ServerHealthDetail;
   ioLoad: number;
+}
+
+/** One hop of the path a client request takes to reach bytes. */
+export type Edge =
+  | 'front'
+  | 'authz'
+  | 'origin-data'
+  | 'cache-hit'
+  | 'director-resolve'
+  | 'fed-token'
+  | 'upstream-fetch'
+  | 'cache-write';
+
+export interface TestResult {
+  binding: {
+    namespace: string;
+    storageKind?: string;
+    issuer?: string;
+    /** True for /pelican/monitoring, which no client reads. */
+    synthetic: boolean;
+  };
+  edges: Edge[];
+  op: string;
+  outcome: 'pass' | 'degraded' | 'fail' | 'skipped';
+  reason?: string;
+  detail?: string;
+  httpStatus?: number;
+  latencyMs?: number;
+  at: number;
+}
+
+export interface TestReport {
+  suite: 'self-test' | 'director-test';
+  outcome: 'pass' | 'degraded' | 'fail' | 'skipped';
+  /** Edges this run reached. Reaching a broken edge still counts as covering it. */
+  covered: Edge[];
+  /** Edges a client depends on that this run did not reach. */
+  uncovered: Edge[];
+  results: TestResult[];
+  at: number;
+}
+
+export interface ServerHealth {
+  overall: string;
+  /** True when free text was withheld; outcomes and coverage are still present. */
+  redacted: boolean;
+  components?: {
+    name: string;
+    status: string;
+    message?: string;
+    lastUpdate: number;
+  }[];
+  selfTest?: TestReport;
+}
+
+/**
+ * The director's fused view: what it measured itself, what the server said, and
+ * what neither of them checked.
+ *
+ * `uncovered` is the field worth surfacing prominently. A server can be green on
+ * everything else and still have entries there, and that combination is exactly
+ * the region where a client can fail while the director sees nothing wrong.
+ */
+export interface ServerHealthDetail {
+  directorProbe?: TestReport;
+  directorProbeAt?: number;
+  reported?: ServerHealth;
+  uncovered?: Edge[];
+  /** The origin's administrator opted out of sharing detail, via Origin.ShareHealthDetails. */
+  detailWithheld?: boolean;
 }
 
 export interface ServerDetailed extends ServerBase {

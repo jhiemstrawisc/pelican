@@ -374,9 +374,13 @@ func cacheNotFromTopoIfPubReads() AdPredicate {
 }
 
 // If the cache is in an error state, we shouldn't send traffic to it.
+//
+// This consults directorView rather than the advertised status alone, so a cache
+// the Director has watched fail is dropped on the Director's own evidence instead
+// of waiting for the cache to concede the point in its next advertisement.
 func cacheNotInErrorState() AdPredicate {
 	return func(ctx *gin.Context, ad copyAd) bool {
-		return metrics.ParseHealthStatus(ad.ServerAd.Status) > metrics.StatusCritical
+		return directorView(ad.ServerAd.URL.String(), ad.ServerAd.Status) > metrics.StatusCritical
 	}
 }
 

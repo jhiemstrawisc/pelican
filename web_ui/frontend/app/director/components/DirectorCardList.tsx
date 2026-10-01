@@ -15,7 +15,7 @@ import semver from 'semver';
 import { DirectorCard, DirectorCardProps } from './';
 import { BooleanToggleButton, CardList } from '@/components';
 import useFuse from '@/helpers/useFuse';
-import serverHasError from '@/helpers/serverHasError';
+import serverHasError, { serverIsUnobserved } from '@/helpers/serverHasError';
 
 interface DirectorCardListProps {
   data: Partial<DirectorCardProps>[];
@@ -31,6 +31,12 @@ export function DirectorCardList({ data, cardProps }: DirectorCardListProps) {
     undefined
   );
   const [serverDowntime, setServerDowntime] = useState<boolean | undefined>(
+    undefined
+  );
+  // Servers nobody has measured. Worth filtering for on its own: they are not
+  // failing, so "Has Error" hides them, and that is exactly how a server the
+  // director cannot see stays invisible to the operator too.
+  const [serverUnverified, setServerUnverified] = useState<boolean | undefined>(
     undefined
   );
   const [serverVersions, setServerVersions] = useState<string[]>([]);
@@ -54,6 +60,11 @@ export function DirectorCardList({ data, cardProps }: DirectorCardListProps) {
         (d) => d?.server?.filtered == serverDowntime
       );
     }
+    if (serverUnverified != undefined) {
+      filteredData = filteredData.filter(
+        (d) => serverIsUnobserved(d?.server) == serverUnverified
+      );
+    }
     if (serverVersions.length > 0) {
       filteredData = filteredData.filter(
         (d) => d?.server?.version && serverVersions.includes(d.server.version)
@@ -65,6 +76,7 @@ export function DirectorCardList({ data, cardProps }: DirectorCardListProps) {
     serverError,
     pelicanServer,
     serverDowntime,
+    serverUnverified,
     serverVersions,
   ]);
 
@@ -139,6 +151,13 @@ export function DirectorCardList({ data, cardProps }: DirectorCardListProps) {
               label={'In Downtime'}
               value={serverDowntime}
               onChange={setServerDowntime}
+            />
+          </Grid>
+          <Grid>
+            <BooleanToggleButton
+              label={'Health Unverified'}
+              value={serverUnverified}
+              onChange={setServerUnverified}
             />
           </Grid>
         </Grid>
